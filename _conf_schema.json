@@ -1,73 +1,75 @@
 {
     "qweather_key": {
-        "title": "和风天气 API Key",
-        "description": "最简方式（推荐日常使用）：直接使用 host + key 请求。示例：https://{weather_host}/v7/weather/now?location=101280109&key=你的key",
+        "description": "和风天气 API Key",
+        "hint": "兼容认证方式。若填写了 qweather_jwt_token，会优先使用 JWT。",
         "type": "string",
         "default": ""
     },
     "qweather_jwt_token": {
-        "title": "和风天气 JWT Token（更安全）",
-        "description": "进阶认证方式。填写后优先使用 Authorization: Bearer。",
+        "description": "和风天气 JWT Token",
+        "hint": "推荐认证方式。填写后使用 Authorization: Bearer。",
         "type": "string",
         "default": ""
     },
     "qweather_weather_host": {
-        "title": "天气 API Host",
-        "description": "在这里配置你的开发者 API Host，不要带 https://。未填写时默认 devapi.qweather.com。",
+        "description": "天气 API Host",
+        "hint": "不要带 https://，默认 devapi.qweather.com。",
         "type": "string",
         "default": "devapi.qweather.com"
     },
     "qweather_geo_host": {
-        "title": "GeoAPI Host（可选覆盖）",
-        "description": "一般留空即可。留空时：key 模式默认与天气 Host 一致，JWT 模式默认 geoapi.qweather.com。",
+        "description": "GeoAPI Host（可选）",
+        "hint": "留空时自动选择：key 模式跟随 weather_host，JWT 模式使用 geoapi.qweather.com。",
         "type": "string",
         "default": ""
     },
     "zhipu_key": {
-        "title": "智谱 API Key",
+        "description": "智谱 API Key",
+        "hint": "用于联网搜索接口认证。",
         "type": "string",
         "default": ""
     },
     "zhipu_search_model": {
-        "title": "智谱搜索模型",
-        "description": "用于联网搜索请求的模型 ID。",
+        "description": "智谱搜索模型",
+        "hint": "联网搜索时使用的模型 ID。",
         "type": "string",
         "default": "glm-4.7-flash"
     },
     "enable_weather": {
-        "title": "启用天气查询工具",
-        "description": "是否允许 AI 调用和风天气的相关工具查询定位及天气。",
-        "type": "boolean",
+        "description": "启用天气工具",
+        "hint": "关闭后不可调用位置查询和天气查询。",
+        "type": "bool",
         "default": true
     },
     "enable_search": {
-        "title": "启用网络搜索工具",
-        "description": "是否允许 AI 调用智谱的联网搜索接口。",
-        "type": "boolean",
+        "description": "启用网络搜索工具",
+        "hint": "关闭后不可调用智谱联网搜索。",
+        "type": "bool",
         "default": true
     },
     "enable_history": {
-        "title": "启用历史记录工具",
-        "description": "是否允许 AI 调用群聊/私聊历史消息读取能力。",
-        "type": "boolean",
+        "description": "启用历史记录工具",
+        "hint": "关闭后不可读取群聊/私聊历史消息。",
+        "type": "bool",
         "default": true
     },
     "enable_weather_summary": {
-        "title": "7日天气配置是否经过压缩总结",
-        "description": "如果开启，7日数据会在传给AI前压缩，防止上下文过长。",
-        "type": "boolean",
+        "description": "启用 7 日天气压缩",
+        "hint": "开启后会先将 7 日天气压缩为更短文本再返回。",
+        "type": "bool",
         "default": true
     },
     "weather_summary_prompt": {
-        "title": "7日天气自定义压缩指令",
-        "description": "告诉AI拿到压缩的天气大纲后该如何回复用户",
+        "description": "7 日天气压缩指令",
+        "hint": "定义压缩后的天气数据应如何总结。",
         "type": "string",
         "default": "请根据系统提供的一周精简天气数据，生成一份简短、口语化、亲切友好的7天天气趋势总结。"
     },
     "weather_summary_llm_provider_id": {
-        "title": "7日天气压缩模型 ID",
-        "description": "可选。填写后将先调用该模型对 7 日天气进行压缩总结。不填则不进行压缩，直接传原始数据给 AI。",
+        "description": "7 日天气压缩模型 ID",
+        "hint": "可选。填写后调用对应 chat_provider_id 做压缩，不填则仅返回本地精简文本。",
         "type": "string",
-        "default": ""
+        "default": "",
+        "_special": "select_provider"
     }
 }

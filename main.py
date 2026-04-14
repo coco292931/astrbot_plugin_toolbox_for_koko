@@ -4,7 +4,8 @@ import json
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.all import llm_tool
-from astrbot.api import logger, AstrMessageEvent
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent
 import traceback
 
 @register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱)", "1.0.0")
