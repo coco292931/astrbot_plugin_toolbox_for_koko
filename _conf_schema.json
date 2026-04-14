@@ -1,0 +1,34 @@
+{
+    "qweather_key": {
+        "title": "和风天气 API Key",
+        "type": "string"
+    },
+    "zhipu_key": {
+        "title": "智谱 API Key",
+        "type": "string"
+    },
+    "enable_weather": {
+        "title": "启用天气查询工具",
+        "description": "是否允许 AI 调用和风天气的相关工具查询定位及天气。",
+        "type": "boolean",
+        "default": true
+    },
+    "enable_search": {
+        "title": "启用网络搜索工具",
+        "description": "是否允许 AI 调用智谱的联网搜索接口。",
+        "type": "boolean",
+        "default": true
+    },
+    "enable_weather_summary": {
+        "title": "7日天气配置是否经过压缩总结",
+        "description": "如果开启，7日数据会在传给AI前压缩，防止上下文过长。",
+        "type": "boolean",
+        "default": true
+    },
+    "weather_summary_prompt": {
+        "title": "7日天气自定义压缩指令",
+        "description": "告诉AI拿到压缩的天气大纲后该如何回复用户",
+        "type": "string",
+        "default": "请根据系统提供的一周精简天气数据，生成一份简短、口语化、亲切友好的7天天气趋势总结。"
+    }
+}
