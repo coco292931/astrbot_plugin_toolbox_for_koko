@@ -15,15 +15,23 @@
 
 请转到 AstrBot 的后台管理面板，填入相应的工具密钥与开启功能：
 
-- **qweather_key**: 和风天气的 API 密钥，可在 [和风天气开放平台](https://dev.qweather.com/) 注册。
+- **qweather_jwt_token**: 和风天气 JWT Token（推荐）。若填写，将优先使用 `Authorization: Bearer` 认证。
+- **qweather_key**: 和风天气 API Key（兼容模式）。未填写 JWT 时会回退使用该字段。
+- **qweather_weather_host**: 天气 API Host。默认 `devapi.qweather.com`，你可填自己的专属域名。
+- **qweather_geo_host**: 可选覆盖项。通常留空即可：
+  - 在 `key` 模式下，GeoAPI 默认与 `qweather_weather_host` 共用同一 host。
+  - 在 `JWT` 模式下，GeoAPI 默认使用 `geoapi.qweather.com`（也可手动覆盖）。
 - **zhipu_key**: 智谱官方发布的 API 密钥，可前往 [智谱大模型开放平台](https://open.bigmodel.cn/) 申请。
-- **zhipu_search_model**: 执行请求的内部大模型标记，默认 \glm-4.7-flash\，可自己更换。
+- **zhipu_search_model**: 执行联网搜索时使用的模型，默认 `glm-4.7-flash`。
 - **功能按需开关**:
-  - \nable_weather\: 是否为大模型启用天气/位置查询工具
-  - \nable_search\: 是否为大模型启用网络查阅工具
-  - \nable_history\: 是否为大模型启用在群组内回看历史消息的能力
-  - \nable_weather_summary\: 是否为 7天极度长段预报 加装一层前置压缩的提示词。
+  - `enable_weather`: 是否启用天气与城市查询工具
+  - `enable_search`: 是否启用联网搜索工具
+  - `enable_history`: 是否启用群聊/私聊历史记录工具
+  - `enable_weather_summary`: 是否启用 7 日天气压缩流程
 - **weather_summary_prompt**: 开启天气精简时的自定义回复约束说明。
+- **weather_summary_llm_provider_id**: 可选。填写后会通过 AstrBot 平台的 `chat_provider_id` 调用对应模型先做 7 日天气压缩。
+  - 不填写：不会自动选模型，也不会调用智谱搜索模型；将回退为本地精简文本返回。
+  - 填写：按该 provider id 调用平台模型（不是 `zhipu_key` 直连）。
 
 ## 🚀 灵活的使用机制 (自动路由)
 
@@ -33,3 +41,17 @@
 2. **run_koko_tool**: 根据上面的文档，大模型可以独立完成组合指令传参、智能容错与后续分析。
 
 当你自然语言问询类似于：“帮我把前面的聊天历史总结一下”、“看看后天去广州天河区要不要带衣服”、“目前最新的 AI 新闻是什么”时，大语言模型将全自动静默获取目标资料并亲切回复。
+
+## 🧭 天气工具建议调用顺序
+
+1. 先调用 `tool_location`，通过关键词获取候选地区及 `Location ID`。
+2. 再调用 `tool_weather`，把选中的 `location` 传入查询实时/3日/7日天气或天气指数。
+
+这样可以避免重名城市导致的误查。
+
+## 🌐 天气 API 路径说明
+
+- Weather: `https://{weather_host}/v7/weather/...`
+- Geo: `https://{geo_host}/v2/city/lookup?...`
+
+说明：Geo 查询路径使用 `/v2/city/lookup`（不是 `/geo/v2/city/lookup`）。

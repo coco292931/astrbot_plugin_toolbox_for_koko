@@ -17,7 +17,7 @@ class ToolboxPlugin(Star):
         self.qweather_key = self.config.get("qweather_key", "")
         self.qweather_jwt_token = self.config.get("qweather_jwt_token", "")
         self.qweather_weather_host = self.config.get("qweather_weather_host", "devapi.qweather.com")
-        self.qweather_geo_host = self.config.get("qweather_geo_host", "geoapi.qweather.com")
+        self.qweather_geo_host = self.config.get("qweather_geo_host", "")
         self.zhipu_key = self.config.get("zhipu_key", "")
         
         # 功能开关
@@ -42,6 +42,14 @@ class ToolboxPlugin(Star):
         elif self.qweather_key:
             use_query_key = True
         return headers, use_query_key
+
+    def _get_geo_host(self, use_query_key: bool) -> str:
+        """Geo Host 选择规则：key 模式默认与 weather host 一致；JWT 模式默认 geoapi。"""
+        if self.qweather_geo_host:
+            return self.qweather_geo_host
+        if use_query_key:
+            return self.qweather_weather_host
+        return "geoapi.qweather.com"
 
     # ---------------- 辅助方法 ----------------
     async def _fetch_qweather(self, api_type: str, location: str, extra_params: str = "") -> dict:
@@ -90,8 +98,8 @@ class ToolboxPlugin(Star):
         if use_query_key:
             query_pairs.append(("key", self.qweather_key))
 
-        host = self.qweather_geo_host.replace("https://", "").replace("http://", "")
-        url = f"https://{host}/geo/v2/city/lookup?{urllib.parse.urlencode(query_pairs)}"
+        host = self._get_geo_host(use_query_key).replace("https://", "").replace("http://", "")
+        url = f"https://{host}/v2/city/lookup?{urllib.parse.urlencode(query_pairs)}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as resp:
