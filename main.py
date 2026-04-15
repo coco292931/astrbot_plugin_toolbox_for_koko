@@ -143,16 +143,16 @@ class ToolboxPlugin(Star):
                 "/tool_weather [location] [query_type] [full_7d]\n"
                 "  获取天气或生活指数。location 必须是 tool_location 输出中的 id。\n"
                 "  query_type: 'now'(实时), '3d'(3日), '7d'(7日), 'indices_1d'(今日生活指数), 'indices_3d'(3日生活指数)。\n"
-                "  full_7d: True(全量返回由你自行总结), False(默认,由接口直接截断成纯文本浓缩)。"
+                "  full_7d: True(全量返回), False(默认,由接口生成总结)。"
             )
         if self.enable_search:
             tools.append(
                 "/tool_search [query] [engine] [content_size] [time_filter]\n"
                 "  执行网页搜索。\n"
                 "  query: 搜索关键词。\n"
-                "  engine: 'search_std'(默认普搜) | 'search_pro_quark'(困难复杂问题的高级搜)。一般情况使用search_std\n"
-                "  content_size: 'lite'(极简摘要) | 'medium'(常规云端摘要) | 'high'(全量查询并附带详情链接)。 一般情况使用lite即可\n"
-                "  time_filter: 'noLimit'(不限) | 'oneDay'(一天内) | 'oneWeek' | 'oneMonth' | 'oneYear'。 默认为noLimit"
+                "  engine: 'search_std'(默认) | 'search_pro_quark'(问题困难复杂或需要极强时效性时)。\n"
+                "  content_size: 'lite'(摘要) | 'medium'(摘要+链接) | 'high'(全量查询并附带详情链接)。 一般情况使用lite即可\n"
+                "  time_filter: 'noLimit'(不限，默认) | 'oneDay'(一天内) | 'oneWeek' | 'oneMonth' | 'oneYear'。"
             )
         if self.enable_history:
             tools.append(
@@ -166,7 +166,7 @@ class ToolboxPlugin(Star):
             )
             
         if not tools:
-            return "当前配置极简模式，没有启用任何工具。"
+            return "当前配置下没有启用任何工具。"
             
         return "当前可用命令：\n\n" + "\n\n".join(tools)
 
