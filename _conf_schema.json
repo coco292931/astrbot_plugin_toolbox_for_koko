@@ -35,6 +35,12 @@
         "type": "string",
         "default": "glm-4.7-flash"
     },
+    "zhipu_search_intent": {
+        "description": "搜索意图",
+        "hint": "是否使用搜索意图。使用后将返回AI总结的全盘消息",
+        "type": "bool",
+        "default": false
+    },
     "enable_weather": {
         "description": "启用天气工具",
         "hint": "关闭后不可调用位置查询和天气查询。",

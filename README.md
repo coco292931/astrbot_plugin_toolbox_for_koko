@@ -52,6 +52,6 @@
 ## 🌐 天气 API 路径说明
 
 - Weather: `https://{weather_host}/v7/weather/...`
-- Geo: `https://{geo_host}/v2/city/lookup?...`
+- Geo: `https://{geo_host}/geo/v2/city/lookup?...`
 
 说明：Geo 查询路径使用 `/v2/city/lookup`（不是 `/geo/v2/city/lookup`）。

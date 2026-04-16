@@ -202,6 +202,8 @@ cython_debug/
 # Sensitive local samples (API keys)
 搜索示例.py
 main-lite-td.py
+local_test_runner.py
+_conf_schema_config.json
 .cursorignore
 .cursorindexingignore
 

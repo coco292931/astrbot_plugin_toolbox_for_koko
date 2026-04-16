@@ -1,6 +1,9 @@
 import aiohttp
+import asyncio
 import urllib.parse
 import json
+from pathlib import Path
+from datetime import datetime, timedelta
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.all import llm_tool
@@ -8,11 +11,42 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 import traceback
 
+
+def _load_schema_defaults() -> dict:
+    """Load default values from local _conf_schema_config.json when available."""
+    cfg_path = Path(__file__).with_name("_conf_schema_config.json")
+    if not cfg_path.exists():
+        return {}
+
+    try:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+
+        defaults = {}
+        for key, meta in raw.items():
+            if isinstance(meta, dict) and "default" in meta:
+                defaults[key] = meta["default"]
+        return defaults
+    except Exception as e:
+        logger.warning(f"读取 _conf_schema_config.json 失败，忽略默认配置: {e}")
+        return {}
+
 @register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱)", "1.0.0")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
-        self.config = config
+        schema_defaults = _load_schema_defaults()
+        incoming = config if isinstance(config, dict) else {}
+        merged = dict(schema_defaults)
+        for key, value in incoming.items():
+            # None / 空字符串按“未提供”处理，避免覆盖配置文件默认值
+            if value is None:
+                continue
+            if isinstance(value, str) and value == "":
+                continue
+            merged[key] = value
+        self.config = merged
 
         # --- 配置加载 ---
         self.qweather_key = self.config.get("qweather_key", "")
@@ -63,7 +97,7 @@ class ToolboxPlugin(Star):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    return await resp.json(content_type=None)
                 return {"code": str(resp.status)}
 
     async def _handle_location(self, args: dict) -> str:
@@ -100,11 +134,13 @@ class ToolboxPlugin(Star):
             query_pairs.append(("key", self.qweather_key))
 
         host = self._get_geo_host(use_query_key).replace("https://", "").replace("http://", "")
-        url = f"https://{host}/v2/city/lookup?{urllib.parse.urlencode(query_pairs)}"
+        url = f"https://{host}/geo/v2/city/lookup?{urllib.parse.urlencode(query_pairs)}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as resp:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        return f"GeoAPI 返回了非预期数据格式: {data}"
                     if data.get("code") == "200" and data.get("location"):
                         results = []
                         for i, loc in enumerate(data["location"], start=1):
@@ -121,7 +157,7 @@ class ToolboxPlugin(Star):
                             "GeoAPI 查询成功。请从下列候选中选择 id 作为 tool_weather 的 location 参数。\n"
                             f"查询词: {location_kw}，返回条数: {len(results)}\n"
                             + "\n".join(results)
-                            + f"\n数据来源: {refer.get('sources')} 许可: {refer.get('license')}"
+                            + f"\n数据来源: {refer.get('sources')}"
                         )
                     return f"未找到 '{location_kw}' 的位置信息，或参数不符合 GeoAPI 要求。"
         except Exception as e:
@@ -136,14 +172,20 @@ class ToolboxPlugin(Star):
         tools = []
         if self.enable_weather:
             tools.append(
-                "/tool_location [location] [number] [adm] [range] [lang]\n"
+                "/tool_weather_location [location] [number] [adm] [range] [lang]\n"
                 "  查询城市编码（GeoAPI），返回详细候选列表。\n"
                 "  location 支持城市名、经纬度、LocationID、Adcode；number 范围 1-20。\n"
                 "\n"
                 "/tool_weather [location] [query_type] [full_7d]\n"
-                "  获取天气或生活指数。location 必须是 tool_location 输出中的 id。\n"
+                "  获取天气或生活指数。location 必须是 tool_weather_location 输出中的 id,如101210112(拱墅区)。\n"
                 "  query_type: 'now'(实时), '3d'(3日), '7d'(7日), 'indices_1d'(今日生活指数), 'indices_3d'(3日生活指数)。\n"
-                "  full_7d: True(全量返回), False(默认,由接口生成总结)。"
+                "  full_7d: True(全量返回), False(默认,由接口生成总结)。\n"
+                "\n"
+                "/tool_weather_history [location] [history_type] [days] [full_history] [lang] [unit]\n"
+                "  获取历史数据（时光机）。location 必须是 tool_weather_location 输出中的 id,如101210112(拱墅区)。\n"
+                "  history_type: 'weather'(历史天气,默认) | 'air'(历史空气质量)。\n"
+                "  days: 默认 1，范围 1-10（不含今天，向前回溯）。\n"
+                "  full_history: True(全量返回), False(默认,由接口生成总结)。"
             )
         if self.enable_search:
             tools.append(
@@ -151,7 +193,7 @@ class ToolboxPlugin(Star):
                 "  执行网页搜索。\n"
                 "  query: 搜索关键词。\n"
                 "  engine: 'search_std'(默认) | 'search_pro_quark'(问题困难复杂或需要极强时效性时)。\n"
-                "  content_size: 'lite'(摘要) | 'medium'(摘要+链接) | 'high'(全量查询并附带详情链接)。 一般情况使用lite即可\n"
+                "  content_size: 'lite'(摘要) | 'medium'(摘要+标题) | 'high'(摘要+全部文章内容)。 一般情况使用lite即可\n"
                 "  time_filter: 'noLimit'(不限，默认) | 'oneDay'(一天内) | 'oneWeek' | 'oneMonth' | 'oneYear'。"
             )
         if self.enable_history:
@@ -180,10 +222,12 @@ class ToolboxPlugin(Star):
             args (object): 参数字典。对应每个工具在 list_koko_tools 中的文档。
         """
         cmd = command.replace("/", "").strip()
-        if cmd == "tool_location":
+        if cmd == "tool_weather_location":
             return await self._handle_location(args)
         elif cmd == "tool_weather":
             return await self._handle_weather(args)
+        elif cmd == "tool_weather_history":
+            return await self._handle_weather_history(args)
         elif cmd == "tool_search":
             return await self._handle_search(args)
         elif cmd == "tool_history":
@@ -199,7 +243,7 @@ class ToolboxPlugin(Star):
 
         location_id = args.get("location", "") or args.get("location_id", "")
         if not location_id:
-            return "缺少 location 参数，请先调用 tool_location 获取 Location ID。"
+            return "缺少 location 参数，请先调用 tool_weather_location 获取 Location ID。"
 
         query_type = args.get("query_type", "now")
         full_7d = args.get("full_7d", False)
@@ -249,6 +293,122 @@ class ToolboxPlugin(Star):
         except Exception as e:
             return f"天气查询内部异常: {str(e)}"
 
+    async def _handle_weather_history(self, args: dict) -> str:
+        if not self.enable_weather:
+            return "天气查询功能已被禁用。"
+        if not self.qweather_jwt_token and not self.qweather_key:
+            return "缺失 QWeather 认证配置，请提供 qweather_jwt_token 或 qweather_key。"
+
+        location_id = args.get("location", "") or args.get("location_id", "")
+        if not location_id:
+            return "缺少 location 参数，请先调用 tool_weather_location 获取 Location ID。"
+
+        history_type = str(args.get("history_type", "weather") or "weather").strip().lower()
+        if history_type not in ("weather", "air"):
+            return f"【API拒绝】无效的 history_type: {history_type}。仅支持 weather 或 air。"
+
+        days_raw = args.get("days", 1)
+        try:
+            days = max(1, min(int(days_raw), 10))
+        except Exception:
+            days = 1
+
+        full_history = args.get("full_history", False)
+        lang = str(args.get("lang", "") or "").strip()
+        unit = str(args.get("unit", "") or "").strip().lower()
+
+        api_type = "historical/weather" if history_type == "weather" else "historical/air"
+        historical_list = []
+
+        try:
+            for offset in range(days, 0, -1):
+                date_str = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+                extra_parts = [f"date={date_str}"]
+                if lang:
+                    extra_parts.append(f"lang={urllib.parse.quote(lang)}")
+                if history_type == "weather" and unit in ("m", "i"):
+                    extra_parts.append(f"unit={unit}")
+
+                extra_historical = "&" + "&".join(extra_parts)
+                day_data = await self._fetch_qweather(api_type, location_id, extra_historical)
+                if day_data.get("code") != "200":
+                    return f"QWeather 历史{('天气' if history_type == 'weather' else '空气')}接口返回错误码: {day_data.get('code')}（date={date_str}）"
+                historical_list.append(day_data)
+
+            if not full_history and self.enable_weather_summary:
+                summary_lines = []
+                for day_data in historical_list:
+                    if history_type == "weather":
+                        weather_daily = day_data.get("weatherDaily", {})
+                        day_date = weather_daily.get("date", "未知日期")
+                        day_text = ""
+                        hourly = day_data.get("weatherHourly", [])
+                        if isinstance(hourly, list) and hourly:
+                            noon = next((h for h in hourly if isinstance(h, dict) and "12:00" in str(h.get("time", ""))), None)
+                            sample = noon if noon else hourly[0]
+                            day_text = sample.get("text", "") if isinstance(sample, dict) else ""
+
+                        summary_lines.append(
+                            f"{day_date}: {weather_daily.get('tempMin', '?')}~{weather_daily.get('tempMax', '?')}°C, "
+                            f"湿度{weather_daily.get('humidity', '?')}%, 降水{weather_daily.get('precip', '?')}mm"
+                            + (f", 概况{day_text}" if day_text else "")
+                        )
+                    else:
+                        hourly_air = day_data.get("airHourly", [])
+                        if isinstance(hourly_air, list) and hourly_air:
+                            date_text = str(hourly_air[0].get("pubTime", "未知时间")).split(" ")[0]
+                            aqi_vals = []
+                            for h in hourly_air:
+                                try:
+                                    if isinstance(h, dict) and h.get("aqi") is not None:
+                                        aqi_vals.append(int(h.get("aqi")))
+                                except Exception:
+                                    continue
+
+                            if aqi_vals:
+                                avg_aqi = round(sum(aqi_vals) / len(aqi_vals))
+                                min_aqi = min(aqi_vals)
+                                max_aqi = max(aqi_vals)
+                            else:
+                                avg_aqi = min_aqi = max_aqi = "?"
+
+                            primary = hourly_air[0].get("primary", "NA") if isinstance(hourly_air[0], dict) else "NA"
+                            category = hourly_air[0].get("category", "未知") if isinstance(hourly_air[0], dict) else "未知"
+                            summary_lines.append(
+                                f"{date_text}: AQI均值{avg_aqi} (范围{min_aqi}-{max_aqi}), 级别{category}, 主要污染物{primary}"
+                            )
+
+                summary_raw = "\n".join(summary_lines) if summary_lines else "无可用历史数据摘要。"
+                if self.weather_summary_llm_provider_id:
+                    try:
+                        prompt = (
+                            f"{self.weather_summary_prompt}\n\n"
+                            f"以下是最近{days}天(不含今天)的历史{('天气' if history_type == 'weather' else '空气质量')}数据精简：\n{summary_raw}"
+                        )
+                        ai_resp = await self.context.llm_generate(
+                            chat_provider_id=self.weather_summary_llm_provider_id,
+                            prompt=prompt,
+                        )
+                        return ai_resp
+                    except Exception:
+                        logger.warning("历史数据LLM压缩失败，回退为原始精简文本。")
+
+                return (
+                    f"【系统提示: 已精简最近{days}天历史{('天气' if history_type == 'weather' else '空气质量')}数据】\n"
+                    f"{summary_raw}\n"
+                    f"【系统行为指令】: {self.weather_summary_prompt}"
+                )
+
+            return json.dumps({
+                "code": "200",
+                "location": location_id,
+                "history_type": history_type,
+                "days": days,
+                "historical": historical_list,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return f"历史数据查询内部异常: {str(e)}"
+
     async def _handle_search(self, args: dict) -> str:
         if not self.enable_search:
             return "网络搜索功能已被禁用。"
@@ -260,8 +420,13 @@ class ToolboxPlugin(Star):
             return "搜索关键词为空。"
 
         engine = args.get("engine", "search_std")
-        content_size = args.get("content_size", "medium")
+        content_size = str(args.get("content_size", "lite")).lower()
         time_filter = args.get("time_filter", "noLimit")
+        count_raw = args.get("count", 10)
+        try:
+            count = max(1, min(int(count_raw), 20))
+        except Exception:
+            count = 10
 
         url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         headers = {
@@ -280,38 +445,72 @@ class ToolboxPlugin(Star):
             "tools": [{
                 "type": "web_search",
                 "web_search": {
-                    "search_result": True,
                     "search_engine": engine,
-                    "search_intent": True,
+                    "search_intent": self.config.get("zhipu_search_intent", True),
                     "search_recency_filter": time_filter,
                     "content_size": api_content_size,
-                    "count": 10
+                    "count": count
                 }
             }]
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+            timeout = aiohttp.ClientTimeout(total=90)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status != 200:
-                        err = await resp.text()
-                        return f"搜索请求失败，状态码: {resp.status}。细节: {err}"
+                        body_text = await resp.text()
+                        try:
+                            err_obj = json.loads(body_text)
+                            err_code = err_obj.get("error", {}).get("code", "unknown")
+                            err_msg = err_obj.get("error", {}).get("message", body_text)
+                            return f"搜索请求失败，状态码: {resp.status}。code: {err_code}，message: {err_msg}"
+                        except Exception:
+                            return f"搜索请求失败，状态码: {resp.status}。细节: {body_text}"
                         
-                    data = await resp.json()
-                    content = data['choices'][0]['message'].get('content', '')
+                    data = await resp.json(content_type=None)
+                    message = ((data.get("choices") or [{}])[0].get("message") or {})
+                    content = message.get("content", "")
+                    web_search = data.get("web_search", []) if isinstance(data, dict) else []
                     
                     if content_size == "lite":
                         # 返回极简摘要给模型自己读
                         return f"【极简摘要】\n{content}"
                     elif content_size == "medium":
-                        return f"【常规搜索】\n{content}"
+                        sources = [
+                            {
+                                "title": w.get("title"),
+                                "publish_date": w.get("publish_date"),
+                                "media": w.get("media"),
+                                "link": w.get("link"),
+                            }
+                            for w in web_search
+                        ]
+                        return f"【常规搜索】\n摘要: {content}\n\n参考来源:\n{json.dumps(sources, ensure_ascii=False)}"
                     else:
-                        web_search = data.get('web_search', [])
-                        sources = [{"title": w.get("title"), "link": w.get("link"), "media": w.get("media")} for w in web_search]
+                        sources = [
+                            {
+                                "title": w.get("title"),
+                                "publish_date": w.get("publish_date"),
+                                "media": w.get("media"),
+                                "link": w.get("link"),
+                                "content": w.get("content"),
+                            }
+                            for w in web_search
+                        ]
                         return f"【全量搜索汇总】\n摘要: {content}\n\n参考来源:\n{json.dumps(sources, ensure_ascii=False)}"
+        except asyncio.TimeoutError as e:
+            logger.error(traceback.format_exc())
+            detail = str(e).strip() or repr(e)
+            return f"搜索请求超时(90s): {detail}"
+        except aiohttp.ClientError as e:
+            logger.error(traceback.format_exc())
+            detail = str(e).strip() or repr(e)
+            return f"搜索网络异常({type(e).__name__}): {detail}"
         except Exception as e:
             logger.error(traceback.format_exc())
-            return f"搜索内部异常: {str(e)}"
+            detail = str(e).strip() or repr(e)
+            return f"搜索内部异常({type(e).__name__}): {detail}"
 
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
