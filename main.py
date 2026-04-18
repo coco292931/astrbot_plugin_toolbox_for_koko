@@ -703,8 +703,10 @@ class ToolboxPlugin(Star):
 
     # ---------------- 工具暴露 ----------------
     @llm_tool("search_koko_tools")
-    async def search_koko_tools(self, event: AstrMessageEvent, query: str) -> dict:
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str = "", **kwargs) -> dict:
         """【必须优先使用】根据简短关键词搜索匹配工具。请使用短语，不要使用完整问句。"""
+        if (not query or not str(query).strip()) and isinstance(kwargs, dict):
+            query = str(kwargs.get("query", "") or "")
         if not query or not query.strip():
             return {"status": "error", "message": "请提供搜索关键词（如“天气”、“搜索”、“历史消息”）"}
 
