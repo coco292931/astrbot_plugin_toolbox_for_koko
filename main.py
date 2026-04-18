@@ -408,10 +408,10 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "mode": {"type": "string", "description": "模式：group(群聊) 或 friend(私聊)，默认group"},
-                        "target_id": {"type": "string", "description": "目标群号或QQ号；group模式下若在群聊上下文中可省略"},
-                        "message_seq": {"type": "integer", "description": "起始消息序号，默认0；通常传0即可由后端返回最近记录"},
-                        "count": {"type": "integer", "description": "返回数量，默认20，最大100"}
+                        "mode": {"type": "string", "description": "模式：group(群聊) 或 friend(私聊)。不传时自动推断：有 group_id 则 group，否则 friend"},
+                        "target_id": {"type": "string", "description": "目标群号或QQ号；可缺省自动补全：group 使用消息的 group_id，friend 使用 sender.user_id"},
+                        "message_seq": {"type": "integer", "description": "分页游标。允许传0（会原样透传）。未传该参数时，group 模式自动使用当前消息 message_id 作为兼容起点；下一页建议使用返回中的 next_message_seq"},
+                        "count": {"type": "integer", "description": "返回数量，默认20，范围1-100"}
                     },
                     "required": []
                 },
@@ -1172,10 +1172,31 @@ class ToolboxPlugin(Star):
         if not self.enable_history:
             return "历史查询功能已被禁用。"
 
-        mode = args.get("mode", "group")
-        target_id = args.get("target_id", "")
-        message_seq = args.get("message_seq", 0)
-        count = args.get("count", 20)
+        msg_obj = getattr(event, "message_obj", None)
+
+        # 参数容错：支持字符串数字输入，并对 count 做区间限制。
+        raw_mode = str(args.get("mode", "") or "").strip().lower()
+        mode = raw_mode if raw_mode in {"group", "friend"} else ""
+
+        target_id = str(args.get("target_id", "") or "").strip()
+
+        has_message_seq = "message_seq" in args and args.get("message_seq") not in (None, "")
+        try:
+            message_seq = int(args.get("message_seq", 0))
+        except Exception:
+            message_seq = 0
+
+        try:
+            count = int(args.get("count", 20))
+        except Exception:
+            count = 20
+        count = max(1, min(count, 100))
+
+        group_id = str(getattr(msg_obj, "group_id", "") or "").strip()
+
+        # mode 缺省时按官方消息字段自动推断：有 group_id 视为群聊，否则视为私聊。
+        if not mode:
+            mode = "group" if group_id else "friend"
 
         # 获取底层 OneBot / go_cqhttp 的 client 实例
         client = None
@@ -1193,32 +1214,94 @@ class ToolboxPlugin(Star):
             if mode == "group":
                 # 群聊历史记录
                 if not target_id:
-                    # 尝试从消息对象提取 group_id
-                    target_id = getattr(event.message_obj, "group_id", "")
+                    target_id = group_id
                     if not target_id:
                         return "缺少目标群号。如果你不在群聊中使用该功能，必须提供 target_id！"
 
-                result = await client.call_action('get_group_msg_history', group_id=target_id, message_seq=message_seq, count=min(count, 100))
+                # 保留 message_seq=0 的原始语义：若调用者显式传入，则原样透传。
+                # 仅在未传 message_seq 时，才使用当前消息 id 作为兼容起点。
+                group_seq = message_seq
+                if not has_message_seq:
+                    try:
+                        group_seq = int(str(getattr(msg_obj, "message_id", "") or "0"))
+                    except Exception:
+                        group_seq = 0
+
+                try:
+                    result = await client.call_action(
+                        'get_group_msg_history',
+                        group_id=target_id,
+                        message_seq=group_seq,
+                        count=count,
+                    )
+                except Exception as first_err:
+                    # 若仍命中“消息不存在”，再尝试用当前时间戳兜底构造 seq 进行一次重试。
+                    err_text = str(first_err)
+                    if "消息" in err_text and "不存在" in err_text:
+                        retry_seq = 0
+                        try:
+                            retry_seq = int(str(getattr(msg_obj, "timestamp", 0) or 0))
+                        except Exception:
+                            retry_seq = 0
+
+                        if retry_seq > 0 and retry_seq != group_seq:
+                            result = await client.call_action(
+                                'get_group_msg_history',
+                                group_id=target_id,
+                                message_seq=retry_seq,
+                                count=count,
+                            )
+                        else:
+                            raise
+                    else:
+                        raise
             else:
                 # 好友历史记录
                 if not target_id:
+                    sender = getattr(msg_obj, "sender", None)
+                    sender_user_id = ""
+                    if sender is not None:
+                        sender_user_id = str(getattr(sender, "user_id", "") or "").strip()
+
+                    if sender_user_id:
+                        target_id = sender_user_id
+                    else:
+                        fallback_sender_id = ""
+                        try:
+                            fallback_sender_id = str(event.get_sender_id() or "").strip()
+                        except Exception:
+                            fallback_sender_id = ""
+
+                        if fallback_sender_id:
+                            target_id = fallback_sender_id
+
+                if not target_id:
                     return "私聊模式下请提供好友的 user_id 或 QQ 号！"
 
-                result = await client.call_action('get_friend_msg_history', user_id=target_id, message_seq=message_seq, count=min(count, 100))
+                result = await client.call_action('get_friend_msg_history', user_id=target_id, message_seq=message_seq, count=count)
 
             logger.debug(f"历史消息接口返回: {result}")
             print(f"历史消息接口返回: {result}")
-            messages = result.get('data', {}).get('messages', [])
+            messages = result.get('data', {}).get('messages', []) if isinstance(result, dict) else []
             if not messages:
                 return "暂无历史消息记录"
 
             # 拼装返回摘要文字
             title = f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
             lines = [f"{title}（拉取到 {len(messages)} 条）："]
+            seq_candidates = []
             
             for msg in messages:
                 sender_info = msg.get('sender', {})
                 sender = sender_info.get('nickname', sender_info.get('user_id', '未知'))
+                seq_value = msg.get('message_seq', msg.get('message_id', ''))
+                try:
+                    seq_num = int(str(seq_value))
+                    if seq_num > 0:
+                        seq_candidates.append(seq_num)
+                except Exception:
+                    pass
+
                 # 优先获取原始纯文本消息
                 raw_msg = msg.get('raw_message', '')
                 if not raw_msg:
@@ -1228,7 +1311,14 @@ class ToolboxPlugin(Star):
                             raw_msg += segment.get('data', {}).get('text', '')
                 # 简单格式化与截断过长单条消息
                 content = raw_msg[:200].replace('\n', '  ')
-                lines.append(f"• {sender}: {content}")
+                seq_text = str(seq_value) if seq_value not in (None, "") else "NA"
+                lines.append(f"• [{seq_text}] {sender}: {content}")
+
+            if seq_candidates:
+                next_message_seq = min(seq_candidates) - 1
+                if next_message_seq > 0:
+                    lines.append("")
+                    lines.append(f"分页提示：下一页可传 message_seq={next_message_seq}（基于本页最早序号向前翻页）。")
                 
             return "\n".join(lines)
             
