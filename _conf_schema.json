@@ -1,51 +1,59 @@
 {
-    "qweather_key": {
-        "description": "和风天气 API Key",
-        "hint": "兼容认证方式。若填写了 qweather_jwt_token，会优先使用 JWT。",
-        "type": "string",
-        "default": ""
-    },
-    "qweather_jwt_token": {
-        "description": "和风天气 JWT Token",
-        "hint": "推荐认证方式。填写后使用 Authorization: Bearer。",
-        "type": "string",
-        "default": ""
-    },
-    "qweather_weather_host": {
-        "description": "天气 API Host",
-        "hint": "不要带 https://，默认 devapi.qweather.com。",
-        "type": "string",
-        "default": "devapi.qweather.com"
-    },
-    "qweather_geo_host": {
-        "description": "GeoAPI Host（可选）",
-        "hint": "留空时自动选择：key 模式跟随 weather_host，JWT 模式使用 geoapi.qweather.com。",
-        "type": "string",
-        "default": ""
-    },
-    "zhipu_key": {
-        "description": "智谱 API Key",
-        "hint": "用于联网搜索接口认证。",
-        "type": "string",
-        "default": ""
-    },
-    "zhipu_search_model": {
-        "description": "智谱搜索模型",
-        "hint": "联网搜索时使用的模型 ID。",
-        "type": "string",
-        "default": "glm-4.7-flash"
-    },
-    "zhipu_search_intent": {
-        "description": "搜索意图",
-        "hint": "是否使用搜索意图。使用后将返回AI总结的全盘消息",
-        "type": "bool",
-        "default": false
-    },
     "enable_weather": {
         "description": "启用天气工具",
         "hint": "关闭后不可调用位置查询和天气查询。",
         "type": "bool",
         "default": true
+    },
+    "weather": {
+        "description": "天气相关配置",
+        "type": "object",
+        "hint": "配置天气工具相关选项",
+        "items": {
+            "qweather_key": {
+                "description": "和风天气 API Key",
+                "hint": "兼容认证方式。若填写了 qweather_jwt_token，会优先使用 JWT。",
+                "type": "string",
+                "default": ""
+            },
+            "qweather_jwt_token": {
+                "description": "和风天气 JWT Token",
+                "hint": "推荐认证方式。填写后使用 Authorization: Bearer。",
+                "type": "string",
+                "default": ""
+            },
+            "qweather_weather_host": {
+                "description": "天气 API Host",
+                "hint": "不要带 https://，默认 devapi.qweather.com。",
+                "type": "string",
+                "default": "devapi.qweather.com"
+            },
+            "qweather_geo_host": {
+                "description": "GeoAPI Host（可选）",
+                "hint": "留空时自动选择：key 模式跟随 weather_host，JWT 模式使用 geoapi.qweather.com。",
+                "type": "string",
+                "default": ""
+            },
+            "enable_weather_summary": {
+                "description": "启用 7 日天气压缩",
+                "hint": "开启后会先将 7 日天气压缩为更短文本再返回。",
+                "type": "bool",
+                "default": true
+            },
+            "weather_summary_prompt": {
+                "description": "7 日天气压缩指令",
+                "hint": "定义压缩后的天气数据应如何总结。",
+                "type": "string",
+                "default": "请根据系统提供的一周精简天气数据，生成一份简短、口语化、亲切友好的7天天气趋势总结。"
+            },
+            "weather_summary_llm_provider_id": {
+                "description": "7 日天气压缩模型 ID",
+                "hint": "可选。填写后调用对应 chat_provider_id 做压缩，不填则仅返回本地精简文本。",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+            }
+        }
     },
     "enable_search": {
         "description": "启用网络搜索工具",
@@ -53,29 +61,85 @@
         "type": "bool",
         "default": true
     },
+    "search": {
+        "description": "搜索相关配置",
+        "type": "object",
+        "hint": "配置搜索工具相关选项",
+        "items": {
+            "zhipu_key": {
+                "description": "智谱 API Key",
+                "hint": "用于联网搜索接口认证。",
+                "type": "string",
+                "default": ""
+            },
+            "zhipu_search_model": {
+                "description": "智谱搜索模型",
+                "hint": "联网搜索时使用的模型 ID。",
+                "type": "string",
+                "default": "glm-4.7-flash"
+            },
+            "zhipu_search_intent": {
+                "description": "搜索意图",
+                "hint": "是否使用搜索意图。使用后将返回AI总结的全盘消息",
+                "type": "bool",
+                "default": false
+            }
+        }
+    },
+    "enable_fetch_url": {
+        "description": "启用网页抓取工具",
+        "hint": "关闭后不可调用网页正文抓取。",
+        "type": "bool",
+        "default": true
+    },
+    "web_fetch": {
+        "description": "网页抓取配置",
+        "type": "object",
+        "hint": "配置网页抓取工具相关选项",
+        "items": {
+            "fetch_url_max_chars": {
+                "description": "网页正文字符阈值",
+                "hint": "超出该长度后按输出策略处理。建议 2000-12000。",
+                "type": "int",
+                "default": 6000
+            },
+            "fetch_url_blocked_targets": {
+                "description": "网页抓取禁用目标列表",
+                "hint": "默认 []。可混合填写 Host/IP 的 JSON 数组，如 [\"localhost\",\"metadata.google.internal\",\"169.254.169.254\"]。",
+                "type": "string",
+                "default": []
+            },
+            "fetch_url_max_redirects": {
+                "description": "网页重定向次数上限",
+                "hint": "最大跟随重定向次数，建议 0-10。",
+                "type": "int",
+                "default": 4
+            },
+            "fetch_url_over_limit_mode": {
+                "description": "网页正文超限策略",
+                "hint": "可选 truncate|ai_summary|full。truncate=截断，ai_summary=调用模型总结，full=完整输出。",
+                "type": "string",
+                "default": "truncate"
+            },
+            "fetch_url_summary_prompt": {
+                "description": "网页正文总结提示词",
+                "hint": "仅在 fetch_url_over_limit_mode=ai_summary 时生效。",
+                "type": "string",
+                "default": "请用中文总结下面网页正文，提炼关键信息并保持准确："
+            },
+            "fetch_url_summary_llm_provider_id": {
+                "description": "网页正文总结模型 ID",
+                "hint": "可选。仅在 ai_summary 模式生效，不填将回退截断。",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+            }
+        }
+    },
     "enable_history": {
         "description": "启用历史记录工具",
         "hint": "关闭后不可读取群聊/私聊历史消息。",
         "type": "bool",
         "default": true
-    },
-    "enable_weather_summary": {
-        "description": "启用 7 日天气压缩",
-        "hint": "开启后会先将 7 日天气压缩为更短文本再返回。",
-        "type": "bool",
-        "default": true
-    },
-    "weather_summary_prompt": {
-        "description": "7 日天气压缩指令",
-        "hint": "定义压缩后的天气数据应如何总结。",
-        "type": "string",
-        "default": "请根据系统提供的一周精简天气数据，生成一份简短、口语化、亲切友好的7天天气趋势总结。"
-    },
-    "weather_summary_llm_provider_id": {
-        "description": "7 日天气压缩模型 ID",
-        "hint": "可选。填写后调用对应 chat_provider_id 做压缩，不填则仅返回本地精简文本。",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider"
     }
 }

@@ -2,13 +2,20 @@ import aiohttp
 import asyncio
 import urllib.parse
 import json
+import random
+import socket
+import ipaddress
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any
+
+from bs4 import BeautifulSoup
+from readability import Document
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.all import llm_tool
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent, filter
 import traceback
 
 
@@ -24,20 +31,81 @@ def _load_schema_defaults() -> dict:
             return {}
 
         defaults = {}
-        for key, meta in raw.items():
-            if isinstance(meta, dict) and "default" in meta:
-                defaults[key] = meta["default"]
+
+        def _collect_defaults(node: dict) -> None:
+            for key, meta in node.items():
+                if not isinstance(meta, dict):
+                    continue
+                if "default" in meta:
+                    defaults[key] = meta["default"]
+                items = meta.get("items")
+                if isinstance(items, dict):
+                    _collect_defaults(items)
+
+        _collect_defaults(raw)
         return defaults
     except Exception as e:
         logger.warning(f"读取 _conf_schema_config.json 失败，忽略默认配置: {e}")
         return {}
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱)", "1.0.0")
+
+def _extract_grouped_runtime_config(raw: dict) -> dict:
+    """只读取新分组配置结构（weather/search/web_fetch）并拍平成运行时键值。"""
+    if not isinstance(raw, dict):
+        return {}
+
+    incoming = {}
+
+    for key in ("enable_weather", "enable_search", "enable_history"):
+        if key in raw:
+            incoming[key] = raw.get(key)
+
+    weather_cfg = raw.get("weather", {})
+    if isinstance(weather_cfg, dict):
+        for key in (
+            "qweather_key",
+            "qweather_jwt_token",
+            "qweather_weather_host",
+            "qweather_geo_host",
+            "enable_weather_summary",
+            "weather_summary_prompt",
+            "weather_summary_llm_provider_id",
+        ):
+            if key in weather_cfg:
+                incoming[key] = weather_cfg.get(key)
+
+    search_cfg = raw.get("search", {})
+    if isinstance(search_cfg, dict):
+        for key in ("zhipu_key", "zhipu_search_model", "zhipu_search_intent"):
+            if key in search_cfg:
+                incoming[key] = search_cfg.get(key)
+
+    web_fetch_cfg = raw.get("web_fetch", {})
+    if isinstance(web_fetch_cfg, dict):
+        for key in (
+            "enable_fetch_url",
+            "fetch_url_max_chars",
+            "fetch_url_blocked_targets",
+            "fetch_url_max_redirects",
+            "fetch_url_over_limit_mode",
+            "fetch_url_summary_prompt",
+            "fetch_url_summary_llm_provider_id",
+            "fetch_url_max_download_bytes",
+        ):
+            if key in web_fetch_cfg:
+                incoming[key] = web_fetch_cfg.get(key)
+
+    if "summary_prompt" in raw:
+        incoming["summary_prompt"] = raw.get("summary_prompt")
+
+    return incoming
+
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.1.0")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         schema_defaults = _load_schema_defaults()
-        incoming = config if isinstance(config, dict) else {}
+        incoming = _extract_grouped_runtime_config(config if isinstance(config, dict) else {})
         merged = dict(schema_defaults)
         for key, value in incoming.items():
             # None / 空字符串按“未提供”处理，避免覆盖配置文件默认值
@@ -59,14 +127,221 @@ class ToolboxPlugin(Star):
         self.enable_weather = self.config.get("enable_weather", True)
         self.enable_search = self.config.get("enable_search", True)
         self.enable_history = self.config.get("enable_history", True)
+        self.enable_fetch_url = self.config.get("enable_fetch_url", True)
+
+        # 网页抓取配置
+        self.fetch_url_max_chars = self._safe_int(self.config.get("fetch_url_max_chars"), 6000, 200, 200000)
+        self.fetch_url_over_limit_mode = str(self.config.get("fetch_url_over_limit_mode", "truncate") or "truncate").strip().lower()
+        if self.fetch_url_over_limit_mode not in {"truncate", "ai_summary", "full"}:
+            self.fetch_url_over_limit_mode = "truncate"
+        summary_prompt_default = "请根据系统提供的数据生成简短、准确、友好的总结。"
+        self.summary_prompt = self.config.get(
+            "summary_prompt",
+            self.config.get(
+                "weather_summary_prompt",
+                self.config.get("fetch_url_summary_prompt", summary_prompt_default),
+            ),
+        )
+        self.fetch_url_summary_prompt = self.summary_prompt
+        self.fetch_url_summary_llm_provider_id = self.config.get("fetch_url_summary_llm_provider_id", "")
+        self.fetch_url_blocked_targets = self._parse_blocked_targets(
+            self.config.get("fetch_url_blocked_targets", [])
+        )
+        self.fetch_url_max_download_bytes = self._safe_int(self.config.get("fetch_url_max_download_bytes", 1_500_000), 1_500_000, 100_000, 5_000_000)
+        self.fetch_url_max_redirects = self._safe_int(self.config.get("fetch_url_max_redirects", 4), 4, 0, 10)
+
+        # 构建工具注册表（用于 call-search-run 三段式调用）
+        self._tool_registry = self._build_tool_registry()
         
         # 7日天气压缩大模型设定的指令
         self.enable_weather_summary = self.config.get("enable_weather_summary", True)
-        self.weather_summary_prompt = self.config.get(
-            "weather_summary_prompt", 
-            "请根据以下长篇天气预报数据，生成一份简短、友好的7天天气趋势总结："
-        )
+        self.weather_summary_prompt = self.summary_prompt
         self.weather_summary_llm_provider_id = self.config.get("weather_summary_llm_provider_id", "")
+
+    def _safe_int(self, value, default: int, min_v: int, max_v: int) -> int:
+        try:
+            num = int(value)
+        except Exception:
+            return default
+        return max(min_v, min(num, max_v))
+
+    def _safe_bool(self, value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"1", "true", "yes", "y", "on"}:
+                return True
+            if text in {"0", "false", "no", "n", "off"}:
+                return False
+        return default
+
+    def _parse_blocked_targets(self, raw_value) -> list[str]:
+        """解析配置中的禁用目标列表，支持 host/ip 的 list 或 JSON 字符串数组。"""
+        items = []
+        if isinstance(raw_value, list):
+            items = raw_value
+        elif isinstance(raw_value, str):
+            raw_text = raw_value.strip()
+            if raw_text:
+                try:
+                    parsed = json.loads(raw_text)
+                    if isinstance(parsed, list):
+                        items = parsed
+                    else:
+                        items = [v.strip() for v in raw_text.split(",") if v.strip()]
+                except Exception:
+                    items = [v.strip() for v in raw_text.split(",") if v.strip()]
+
+        valid_targets = []
+        for item in items:
+            target_text = str(item).strip().lower()
+            if not target_text:
+                continue
+            try:
+                ipaddress.ip_address(target_text)
+                valid_targets.append(target_text)
+            except ValueError:
+                valid_targets.append(target_text)
+
+        # 去重并保持顺序
+        return list(dict.fromkeys(valid_targets))
+
+    def _build_tool_registry(self) -> dict:
+        """构建工具注册表，统一工具描述、参数定义、关键词与处理函数。"""
+        registry = {}
+
+        if self.enable_weather:
+            registry["tool_weather_location"] = {
+                "name": "tool_weather_location",
+                "description": "查询城市/区域位置编码（Location ID）。建议先用该工具再调用 tool_weather 或 tool_weather_history。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "位置关键词，支持城市名、经纬度、LocationID、Adcode，必填。例如：杭州、116.41,39.92、101210101"},
+                        "number": {"type": "integer", "description": "返回候选数量，1-20，默认10"},
+                        "adm": {"type": "string", "description": "附加行政区过滤，可选"},
+                        "range": {"type": "string", "description": "搜索范围，可选"},
+                        "lang": {"type": "string", "description": "返回语言，默认zh"}
+                    },
+                    "required": ["location"]
+                },
+                "keywords": ["天气", "城市编码", "location", "地理查询", "地区", "城市", "weather location"],
+                "handler": self._run_tool_weather_location,
+            }
+
+            registry["tool_weather"] = {
+                "name": "tool_weather",
+                "description": "获取实时/3日/7日天气或生活指数。location 建议使用 tool_weather_location 的 id。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id，或者以英文逗号分隔的经度,纬度坐标如 116.41,39.92"},
+                        "query_type": {"type": "string", "description": "查询类型：now(实时)、3d(3日)、7d(7日)、indices_1d(今日生活指数)、indices_3d(3日生活指数)，默认now"},
+                        "full_7d": {"type": "boolean", "description": "仅在 query_type=7d 时生效。true 返回全量原始数据，false 返回精简总结（默认）"}
+                    },
+                    "required": ["location"]
+                },
+                "keywords": ["天气", "实时天气", "天气预报", "生活指数", "7日天气", "weather"],
+                "handler": self._run_tool_weather,
+            }
+
+            registry["tool_weather_history"] = {
+                "name": "tool_weather_history",
+                "description": "查询历史天气或历史空气质量（不含今天，最多回溯10天）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id"},
+                        "history_type": {"type": "string", "description": "历史类型：weather(历史天气，默认) 或 air(历史空气质量)"},
+                        "days": {"type": "integer", "description": "回溯天数，1-10，默认1"},
+                        "full_history": {"type": "boolean", "description": "true 返回全量历史数据，false 返回精简总结，>3d时默认返回精简总结"},
+                        "lang": {"type": "string", "description": "语言参数，可选"},
+                        "unit": {"type": "string", "description": "单位参数（weather时可选 m/i）"}
+                    },
+                    "required": ["location"]
+                },
+                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气"],
+                "handler": self._run_tool_weather_history,
+            }
+
+        if self.enable_search:
+            registry["tool_search"] = {
+                "name": "tool_search",
+                "description": "执行联网搜索并返回摘要或来源内容。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "搜索关键词，必填"},
+                        "engine": {"type": "string", "description": "搜索引擎：search_std(默认) 或 search_pro_quark(复杂问题/强时效)"},
+                        "content_size": {"type": "string", "description": "内容粒度：lite(摘要)、medium(摘要+来源信息)、high(摘要+来源全文)；默认lite"},
+                        "time_filter": {"type": "string", "description": "时间过滤：noLimit、oneDay、oneWeek、oneMonth、oneYear"},
+                        "count": {"type": "integer", "description": "结果数量，1-20，默认10"}
+                    },
+                    "required": ["query"]
+                },
+                "keywords": ["搜索", "联网", "查资料", "网页搜索", "search", "web"],
+                "handler": self._run_tool_search,
+            }
+
+        if self.enable_fetch_url:
+            registry["tool_fetch_url"] = {
+                "name": "tool_fetch_url",
+                "description": "抓取单个网页正文文本。适合对指定 URL 做内容提取。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"}
+                    },
+                    "required": ["url"]
+                },
+                "keywords": ["抓取网页", "网页正文", "url", "fetch", "extract"],
+                "handler": self._run_tool_fetch_url,
+            }
+
+        if self.enable_history:
+            registry["tool_history"] = {
+                "name": "tool_history",
+                "description": "获取群聊或好友历史消息记录。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "description": "模式：group(群聊) 或 friend(私聊)，默认group"},
+                        "target_id": {"type": "string", "description": "目标群号或QQ号；group模式下若在群聊上下文中可省略"},
+                        "message_seq": {"type": "integer", "description": "起始消息序号，默认0；通常传0即可由后端返回最近记录"},
+                        "count": {"type": "integer", "description": "返回数量，默认20，最大100"}
+                    },
+                    "required": []
+                },
+                "keywords": ["历史消息", "聊天记录", "群历史", "私聊历史", "history", "message log"],
+                "handler": self._run_tool_history,
+            }
+
+        return registry
+
+    def _get_available_tools(self) -> dict:
+        """返回当前启用状态下可用的工具。"""
+        return dict(self._tool_registry)
+
+    async def _run_tool_weather_location(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_location(args)
+
+    async def _run_tool_weather(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_weather(args)
+
+    async def _run_tool_weather_history(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_weather_history(args)
+
+    async def _run_tool_search(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_search(args)
+
+    async def _run_tool_fetch_url(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_fetch_url(args)
+
+    async def _run_tool_history(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_history(event, args)
 
     def _build_qweather_auth(self):
         """优先使用 Bearer JWT（文档推荐），否则回退到 key 参数模式。"""
@@ -85,6 +360,169 @@ class ToolboxPlugin(Star):
         if use_query_key:
             return self.qweather_weather_host
         return "geoapi.qweather.com"
+
+    async def _tidy_text(self, text: str) -> str:
+        """清理网页文本，压缩空白。"""
+        return " ".join(text.split())
+
+    async def _validate_fetch_url(self, url: str) -> tuple[bool, str]:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return False, "url 必须以 http:// 或 https:// 开头。"
+        if not parsed.netloc:
+            return False, "url 缺少域名。"
+
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, "url 域名无效。"
+
+        deny_host = {
+            "localhost",
+            "metadata.google.internal",
+            "metadata.azure.internal",
+        }
+        deny_targets = set(self.fetch_url_blocked_targets)
+        if host in deny_host or host.endswith(".local") or host in deny_targets:
+            return False, "目标地址已被管理员禁止访问。"
+
+        def _bad_ip(ip_str: str) -> bool:
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return True
+            if ip_str in deny_targets:
+                return True
+            return (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            )
+
+        try:
+            ip_literal = ipaddress.ip_address(host)
+            if _bad_ip(str(ip_literal)):
+                return False, "目标地址已被管理员禁止访问。"
+            return True, ""
+        except ValueError:
+            pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            if not infos:
+                return False, "无法解析目标域名。"
+            for info in infos:
+                sockaddr = info[4]
+                resolved_ip = sockaddr[0]
+                if _bad_ip(resolved_ip):
+                    return False, "目标地址已被管理员禁止访问。"
+        except Exception:
+            return False, "无法解析目标域名。"
+
+        return True, ""
+
+    async def _normalize_and_validate_fetch_url(self, url: str) -> tuple[bool, str, str]:
+        url_clean = str(url or "").strip()
+        ok, err = await self._validate_fetch_url(url_clean)
+        if not ok:
+            return False, "", err
+        return True, url_clean, ""
+
+    async def _process_fetched_text(self, text: str) -> str:
+        if len(text) <= self.fetch_url_max_chars:
+            return text
+
+        mode = self.fetch_url_over_limit_mode
+        if mode == "full":
+            return text
+
+        truncated = text[: self.fetch_url_max_chars]
+        if mode == "truncate":
+            return f"{truncated}...\n\n[系统提示] 网页正文超长，已按配置截断。"
+
+        provider_id = self.fetch_url_summary_llm_provider_id or self.weather_summary_llm_provider_id
+        if not provider_id:
+            return f"{truncated}...\n\n[系统提示] 未配置 fetch_url_summary_llm_provider_id，已回退为截断输出。"
+
+        try:
+            prompt = f"{self.fetch_url_summary_prompt}\n\n网页正文:\n{text}"
+            ai_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            return ai_resp
+        except Exception:
+            logger.warning("网页正文 AI 总结失败，回退为截断输出。")
+            return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
+
+    async def _get_from_url(self, url: str) -> str:
+        """抓取并提取网页正文。"""
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ]
+        headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            current_url = url
+            html = ""
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for _ in range(self.fetch_url_max_redirects + 1):
+                    ok, normalized_url, err = await self._normalize_and_validate_fetch_url(current_url)
+                    if not ok:
+                        return err
+
+                    async with session.get(normalized_url, headers=headers, allow_redirects=False) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("Location", "")
+                            if not location:
+                                return "抓取网页失败：重定向地址为空。"
+                            current_url = urllib.parse.urljoin(normalized_url, location)
+                            continue
+
+                        if response.status != 200:
+                            return f"抓取网页失败，状态码: {response.status}"
+
+                        content_type = (response.headers.get("Content-Type") or "").lower()
+                        if content_type and ("text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type):
+                            return f"暂不支持该内容类型: {content_type}"
+
+                        raw = await response.content.read(self.fetch_url_max_download_bytes + 1)
+                        if len(raw) > self.fetch_url_max_download_bytes:
+                            return f"网页内容过大，已超过 {self.fetch_url_max_download_bytes} 字节限制。"
+
+                        charset = response.charset or "utf-8"
+                        html = raw.decode(charset, errors="ignore")
+                        break
+                else:
+                    return "抓取网页失败：重定向次数超过限制。"
+
+            doc = Document(html)
+            summary_html = doc.summary(html_partial=True)
+            soup = BeautifulSoup(summary_html, "html.parser")
+            text = await self._tidy_text(soup.get_text(" ", strip=True))
+            if not text:
+                return "网页内容为空或无法提取正文。"
+            return await self._process_fetched_text(text)
+        except asyncio.TimeoutError:
+            return "抓取网页超时。"
+        except aiohttp.ClientError as e:
+            return f"抓取网页网络异常: {type(e).__name__} {str(e)}"
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            return f"抓取网页内部异常: {type(e).__name__} {str(e)}"
 
     # ---------------- 辅助方法 ----------------
     async def _fetch_qweather(self, api_type: str, location: str, extra_params: str = "") -> dict:
@@ -164,76 +602,158 @@ class ToolboxPlugin(Star):
             return f"查询位置信息异常: {str(e)}"
 
     # ---------------- 工具暴露 ----------------
-    @llm_tool("list_koko_tools")
-    async def list_koko_tools(self, event: AstrMessageEvent) -> str:
-        """
-        获取koko工具箱工具列表。必须先使用此工具了解支持哪些内部命令，再使用 run_koko_tool!
-        """
-        tools = []
-        if self.enable_weather:
-            tools.append(
-                "/tool_weather_location [location] [number] [adm] [range] [lang]\n"
-                "  查询城市编码（GeoAPI），返回详细候选列表。\n"
-                "  location 支持城市名、经纬度、LocationID、Adcode；number 范围 1-20。\n"
-                "\n"
-                "/tool_weather [location] [query_type] [full_7d]\n"
-                "  获取天气或生活指数。location 必须是 tool_weather_location 输出中的 id,如101210112(拱墅区)。\n"
-                "  query_type: 'now'(实时), '3d'(3日), '7d'(7日), 'indices_1d'(今日生活指数), 'indices_3d'(3日生活指数)。\n"
-                "  full_7d: True(全量返回), False(默认,由接口生成总结)。\n"
-                "\n"
-                "/tool_weather_history [location] [history_type] [days] [full_history] [lang] [unit]\n"
-                "  获取历史数据（时光机）。location 必须是 tool_weather_location 输出中的 id,如101210112(拱墅区)。\n"
-                "  history_type: 'weather'(历史天气,默认) | 'air'(历史空气质量)。\n"
-                "  days: 默认 1，范围 1-10（不含今天，向前回溯）。\n"
-                "  full_history: True(全量返回), False(默认,由接口生成总结)。"
+    @llm_tool("search_koko_tools")
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str) -> dict:
+        """【必须优先使用】根据简短关键词搜索匹配工具。请使用短语，不要使用完整问句。"""
+        if not query or not query.strip():
+            return {"status": "error", "message": "请提供搜索关键词（如“天气”、“搜索”、“历史消息”）"}
+
+        available_tools = self._get_available_tools()
+        query_lower = query.strip().lower()
+        matched = []
+
+        for name, meta in available_tools.items():
+            keywords = meta.get("keywords", [])
+            if (
+                query_lower in name.lower()
+                or query_lower in meta.get("description", "").lower()
+                or any(query_lower in str(kw).lower() for kw in keywords)
+            ):
+                matched.append(
+                    {
+                        "name": name,
+                        "description": meta.get("description", ""),
+                        "parameters": meta.get("parameters", {"type": "object", "properties": {}, "required": []}),
+                    }
+                )
+
+        if not matched:
+            return {
+                "status": "success",
+                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。",
+            }
+
+        result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
+        for tool in matched[:10]:
+            result_lines.append(f"- {tool['name']}: {tool['description'][:60]}...")
+
+        return {"status": "success", "message": "\n".join(result_lines), "tools": matched}
+
+    @llm_tool("call_koko_tools")
+    async def call_koko_tools(self, event: AstrMessageEvent, **kwargs) -> dict:
+        """返回当前可用工具列表（名称 + 描述 + 参数要点）。仅当 search_koko_tools 未找到时使用。"""
+        available_tools = self._get_available_tools()
+        if not available_tools:
+            return {"status": "success", "message": "当前配置下没有启用任何工具。", "tool_names": []}
+
+        tools_list = []
+        for name, meta in available_tools.items():
+            params = meta.get("parameters", {})
+            required = params.get("required", []) if isinstance(params, dict) else []
+            properties = params.get("properties", {}) if isinstance(params, dict) else {}
+            required_text = "无"
+            if required:
+                required_text = ", ".join(str(r) for r in required)
+            arg_keys = list(properties.keys())[:6] if isinstance(properties, dict) else []
+            args_text = ", ".join(arg_keys) if arg_keys else "无"
+            tools_list.append(
+                f"- {name}: {meta.get('description', '')}\n"
+                f"  必填参数: {required_text}\n"
+                f"  可用参数: {args_text}"
             )
-        if self.enable_search:
-            tools.append(
-                "/tool_search [query] [engine] [content_size] [time_filter]\n"
-                "  执行网页搜索。\n"
-                "  query: 搜索关键词。\n"
-                "  engine: 'search_std'(默认) | 'search_pro_quark'(问题困难复杂或需要极强时效性时)。\n"
-                "  content_size: 'lite'(摘要) | 'medium'(摘要+标题) | 'high'(摘要+全部文章内容)。 一般情况使用lite即可\n"
-                "  time_filter: 'noLimit'(不限，默认) | 'oneDay'(一天内) | 'oneWeek' | 'oneMonth' | 'oneYear'。"
-            )
-        if self.enable_history:
-            tools.append(
-                "/tool_history [mode] [target_id] [message_seq] [count]\n"
-                "  获取历史消息记录。\n"
-                "  mode: 'group'(群聊) | 'friend'(好友私聊)。\n"
-                "  target_id: 对应的群号或QQ号(如果在当前群聊查询则可留空)。\n"
-                "  message_seq: 起始消息序号(不与page共用)。\n"
-                "  page: 分页拉取(与message_seq互斥，1为最新)。\n"
-                "  count: 数量(默认20条，最大100条)。"
-            )
-            
-        if not tools:
-            return "当前配置下没有启用任何工具。"
-            
-        return "当前可用命令：\n\n" + "\n\n".join(tools)
+
+        msg = "📦 可用工具列表：\n" + "\n".join(tools_list)
+        return {"status": "success", "message": msg, "tool_names": list(available_tools.keys())}
 
     @llm_tool("run_koko_tool")
-    async def run_koko_tool(self, event: AstrMessageEvent, command: str, args: dict) -> str:
+    async def run_koko_tool(
+        self,
+        event: AstrMessageEvent,
+        tool_name: str = "",
+        tool_args: str = "",
+        command: str = "",
+        args: dict = None,
+    ) -> dict:
         """
-        执行koko工具箱的工具。需先通过 list_koko_tools 拿到支持的命令说明。
+        执行指定工具。调用顺序建议：先 search_koko_tools，再在必要时 call_koko_tools，最后 run_koko_tool。
         
         Args:
-            command (string): 工具命令名，带或不带斜杠均可。例如 "tool_weather", "/tool_search"
-            args (object): 参数字典。对应每个工具在 list_koko_tools 中的文档。
+            tool_name(string): 要执行的工具名称，必填
+            tool_args(string): 工具参数 JSON 字符串，可选。例如 '{"query": "杭州天气"}'
+            command(string): 兼容旧参数名（等价于 tool_name）
+            args(object): 兼容旧参数名（等价于 tool_args 解析后的对象）
         """
-        cmd = command.replace("/", "").strip()
-        if cmd == "tool_weather_location":
-            return await self._handle_location(args)
-        elif cmd == "tool_weather":
-            return await self._handle_weather(args)
-        elif cmd == "tool_weather_history":
-            return await self._handle_weather_history(args)
-        elif cmd == "tool_search":
-            return await self._handle_search(args)
-        elif cmd == "tool_history":
-            return await self._handle_history(event, args)
-        else:
-            return f"未知的命令: {command}。请使用 list_koko_tools 查看支持的工具。"
+        name_raw = tool_name or command
+        if not name_raw:
+            return {
+                "status": "error",
+                "message": "缺少 tool_name。请先使用 search_koko_tools 查找工具名称。若仍不确定，可用 call_koko_tools 查看完整列表。",
+            }
+
+        normalized_name = name_raw.replace("/", "").strip()
+        available_tools = self._get_available_tools()
+        if normalized_name not in available_tools:
+            return {
+                "status": "error",
+                "message": f"无效的工具名称或工具未启用: {name_raw}。请先使用 search_koko_tools 或 call_koko_tools 获取可用工具。",
+            }
+
+        args_dict = {}
+        if isinstance(args, dict):
+            args_dict = args
+        elif tool_args and tool_args.strip():
+            try:
+                parsed_args = json.loads(tool_args)
+                if isinstance(parsed_args, dict):
+                    args_dict = parsed_args
+                else:
+                    return {"status": "error", "message": "tool_args 必须是 JSON 对象字符串。"}
+            except json.JSONDecodeError:
+                return {"status": "error", "message": "参数格式错误，tool_args 必须是有效 JSON 字符串。"}
+
+        handler = available_tools[normalized_name]["handler"]
+        try:
+            result = await handler(event, args_dict)
+            return {"status": "success", "message": result}
+        except Exception as e:
+            logger.error(f"[run_koko_tool] 执行工具 {normalized_name} 失败: {e}")
+            return {"status": "error", "message": f"工具执行出错: {str(e)}"}
+
+    @llm_tool(name="koko_fetch_url")
+    async def fetch_website_content(self, event: AstrMessageEvent, url: str) -> str:
+        """Fetch the content of a website with the given web url.
+
+        Args:
+            url(string): The url of the website to fetch content from
+
+        """
+        if not self.enable_fetch_url:
+            return "网页抓取功能已被禁用。"
+
+        ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
+        if not ok:
+            return err
+        return await self._get_from_url(normalized_url)
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
+        try:
+            guide_text = (
+                "[重要工具使用规范] 当你需要调用本插件能力时，必须遵循以下顺序：\n"
+                "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取）。\n"
+                "2. 若 search_koko_tools 没找到，再调用 call_koko_tools 查看完整可用工具列表和参数要点。\n"
+                "3. 确认工具名后，调用 run_koko_tool，并使用 tool_name + tool_args(JSON字符串)。\n"
+                "禁止跳过搜索直接猜测工具名。"
+            )
+            guide_text = ()
+
+            if hasattr(request, "system_prompt") and request.system_prompt:
+                if guide_text not in request.system_prompt:
+                    request.system_prompt += f"\n{guide_text}\n"
+            elif hasattr(request, "system_prompt"):
+                request.system_prompt = guide_text + "\n"
+        except Exception as e:
+            logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
     async def _handle_weather(self, args: dict) -> str:
         if not self.enable_weather:
@@ -246,7 +766,7 @@ class ToolboxPlugin(Star):
             return "缺少 location 参数，请先调用 tool_weather_location 获取 Location ID。"
 
         query_type = args.get("query_type", "now")
-        full_7d = args.get("full_7d", False)
+        full_7d = self._safe_bool(args.get("full_7d", False), False)
 
         valid_types = {
             "now": "weather/now",
@@ -313,7 +833,11 @@ class ToolboxPlugin(Star):
         except Exception:
             days = 1
 
-        full_history = args.get("full_history", False)
+        if "full_history" in args:
+            full_history = self._safe_bool(args.get("full_history"), False)
+        else:
+            # 未显式传 full_history 时，按 args(days)自动决策：>3天默认压缩，<=3天默认全量
+            full_history = days <= 3
         lang = str(args.get("lang", "") or "").strip()
         unit = str(args.get("unit", "") or "").strip().lower()
 
@@ -511,6 +1035,20 @@ class ToolboxPlugin(Star):
             logger.error(traceback.format_exc())
             detail = str(e).strip() or repr(e)
             return f"搜索内部异常({type(e).__name__}): {detail}"
+
+    async def _handle_fetch_url(self, args: dict) -> str:
+        if not self.enable_fetch_url:
+            return "网页抓取功能已被禁用。"
+
+        url = str(args.get("url", "") or "").strip()
+        if not url:
+            return "缺少 url 参数。"
+
+        ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
+        if not ok:
+            return err
+
+        return await self._get_from_url(normalized_url)
 
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
