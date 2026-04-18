@@ -449,7 +449,8 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"}
+                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"},
+                        "skip_filter": {"type": "boolean", "description": "是否跳过正文提取过滤并直接返回原始响应文本，默认 false。用于前端渲染/挑战页排障"}
                     },
                     "required": ["url"]
                 },
@@ -727,7 +728,7 @@ class ToolboxPlugin(Star):
             logger.warning("网页正文 AI 总结失败，回退为截断输出。")
             return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
 
-    async def _get_from_url(self, url: str) -> str:
+    async def _get_from_url(self, url: str, skip_filter: bool = False) -> str:
         """抓取并提取网页正文。"""
         user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -781,6 +782,9 @@ class ToolboxPlugin(Star):
 
                         charset = response.charset or "utf-8"
                         decoded = raw.decode(charset, errors="ignore")
+
+                        if skip_filter:
+                            return await self._process_fetched_text(decoded)
 
                         if is_json:
                             try:
@@ -1028,11 +1032,12 @@ class ToolboxPlugin(Star):
             return {"status": "error", "message": f"工具执行出错: {str(e)}"}
 
     @llm_tool(name="koko_fetch_url")
-    async def fetch_website_content(self, event: AstrMessageEvent, url: str) -> str:
+    async def fetch_website_content(self, event: AstrMessageEvent, url: str, skip_filter: bool = False) -> str:
         """Fetch the content of a website with the given web url.
 
         Args:
             url(string): The url of the website to fetch content from
+            skip_filter(boolean): Whether to bypass extraction and return raw response text.
 
         """
         if not self.enable_fetch_url:
@@ -1041,7 +1046,7 @@ class ToolboxPlugin(Star):
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
-        return await self._get_from_url(normalized_url)
+        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
@@ -1376,12 +1381,13 @@ class ToolboxPlugin(Star):
         url = str(args.get("url", "") or "").strip()
         if not url:
             return "缺少 url 参数。"
+        skip_filter = self._safe_bool(args.get("skip_filter", False), False)
 
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
 
-        return await self._get_from_url(normalized_url)
+        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
 
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
