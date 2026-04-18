@@ -173,7 +173,8 @@ class ToolboxPlugin(Star):
         self.fetch_url_blocked_targets = self._parse_blocked_targets(
             self.config.get("fetch_url_blocked_targets", [])
         )
-        self.fetch_url_max_download_bytes = self._safe_int(self.config.get("fetch_url_max_download_bytes", 1_500_000), 1_500_000, 100_000, 5_000_000)
+        # 默认放宽到 6MB，并允许按配置上调（上限 30MB），提升长文抓取成功率。
+        self.fetch_url_max_download_bytes = self._safe_int(self.config.get("fetch_url_max_download_bytes", 6 * 1024 * 1024), 6 * 1024 * 1024, 500_000, 30 * 1024 * 1024)
         self.fetch_url_max_redirects = self._safe_int(self.config.get("fetch_url_max_redirects", 4), 4, 0, 10)
 
         # 构建工具注册表（用于 call-search-run 三段式调用）
@@ -414,8 +415,6 @@ class ToolboxPlugin(Star):
                         "history_type": {"type": "string", "description": "历史类型：weather(历史天气，默认) 或 air(历史空气质量)"},
                         "days": {"type": "integer", "description": "回溯天数，1-10，默认1"},
                         "full_history": {"type": "boolean", "description": "true 返回全量历史数据，false 返回精简总结，>3d时默认返回精简总结"},
-                        "lang": {"type": "string", "description": "语言参数，可选"},
-                        "unit": {"type": "string", "description": "单位参数（weather时可选 m/i）"},
                         "focus": {"type": "string", "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞"}
                     },
                     "required": ["location"]
@@ -521,6 +520,115 @@ class ToolboxPlugin(Star):
     async def _tidy_text(self, text: str) -> str:
         """清理网页文本，压缩空白。"""
         return " ".join(text.split())
+
+    async def _extract_best_text_from_html(self, html: str) -> str:
+        """优先用 readability，失败时回退到原始 HTML 文本提取。"""
+        # 1) readability 主路径
+        primary_text = ""
+        try:
+            doc = Document(html)
+            summary_html = doc.summary(html_partial=True)
+            soup = BeautifulSoup(summary_html, "html.parser")
+            primary_text = await self._tidy_text(soup.get_text(" ", strip=True))
+        except Exception:
+            primary_text = ""
+
+        if primary_text and len(primary_text) >= 120:
+            return primary_text
+
+        # 2) 原始 HTML 回退路径
+        full_soup = BeautifulSoup(html, "html.parser")
+        for tag in full_soup(["script", "style", "noscript", "svg", "canvas"]):
+            tag.decompose()
+        fallback_text = await self._tidy_text(full_soup.get_text(" ", strip=True))
+        if fallback_text:
+            return fallback_text
+
+        # 3) 最后兜底：title + description
+        title = ""
+        if full_soup.title and full_soup.title.string:
+            title = full_soup.title.string.strip()
+
+        desc = ""
+        meta_candidates = [
+            full_soup.find("meta", attrs={"name": "description"}),
+            full_soup.find("meta", attrs={"property": "og:description"}),
+            full_soup.find("meta", attrs={"name": "twitter:description"}),
+        ]
+        for meta in meta_candidates:
+            if meta and meta.get("content"):
+                desc = str(meta.get("content")).strip()
+                if desc:
+                    break
+
+        combined = await self._tidy_text(f"{title} {desc}".strip())
+        return combined
+
+    async def _extract_text_from_json_payload(self, payload: Any) -> str:
+        """从 JSON 结构中提取可读文本，适配直接返回 API JSON 的 URL。"""
+        text_fields = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    key_lower = str(k).lower()
+                    if isinstance(v, str):
+                        # 优先收集常见正文/摘要字段。
+                        if key_lower in {
+                            "title",
+                            "name",
+                            "summary",
+                            "description",
+                            "content",
+                            "body",
+                            "text",
+                            "excerpt",
+                            "markdown",
+                            "html",
+                        }:
+                            cleaned = " ".join(v.split())
+                            if cleaned:
+                                text_fields.append(f"{k}: {cleaned}")
+                    else:
+                        walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(payload)
+
+        if text_fields:
+            return "\n".join(text_fields)
+
+        # 找不到正文相关字段时，回退为可读 JSON 文本。
+        try:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(payload)
+
+    async def _detect_unextractable_page_reason(self, html: str) -> str | None:
+        """识别当前抓取链路难以提取正文的页面特征，并返回原因。"""
+        lowered = html.lower()
+
+        # Cloudflare challenge 或类似挑战页。
+        if "challenge-platform" in lowered or "__cf$cv$params" in lowered:
+            return "页面触发了反爬/挑战验证，当前抓取方式无法直接获取正文。"
+
+        soup = BeautifulSoup(html, "html.parser")
+        body_text = await self._tidy_text(soup.get_text(" ", strip=True))
+
+        app_container = soup.find(id="app")
+        app_container_empty = False
+        if app_container is not None:
+            app_container_text = await self._tidy_text(app_container.get_text(" ", strip=True))
+            app_container_empty = len(app_container_text) < 30
+
+        # 典型 SPA 壳页：正文几乎为空，只有 JS 入口脚本。
+        has_module_script = bool(soup.find("script", attrs={"type": "module"}))
+        if len(body_text) < 80 and app_container_empty and has_module_script:
+            return "页面疑似前端渲染(SPA)壳页，原始 HTML 不包含正文内容。"
+
+        return None
 
     async def _validate_fetch_url(self, url: str) -> tuple[bool, str]:
         parsed = urllib.parse.urlparse(url)
@@ -657,23 +765,44 @@ class ToolboxPlugin(Star):
                             return f"抓取网页失败，状态码: {response.status}"
 
                         content_type = (response.headers.get("Content-Type") or "").lower()
-                        if content_type and ("text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type):
+                        is_json = "application/json" in content_type or "+json" in content_type
+                        is_html_or_text = (
+                            "text/html" in content_type
+                            or "application/xhtml+xml" in content_type
+                            or "text/plain" in content_type
+                        )
+                        if content_type and (not is_json and not is_html_or_text):
                             return f"暂不支持该内容类型: {content_type}"
 
                         raw = await response.content.read(self.fetch_url_max_download_bytes + 1)
                         if len(raw) > self.fetch_url_max_download_bytes:
-                            return f"网页内容过大，已超过 {self.fetch_url_max_download_bytes} 字节限制。"
+                            limit_mb = self.fetch_url_max_download_bytes / (1024 * 1024)
+                            return f"网页内容过大，已超过 {limit_mb:.1f} MB 限制。"
 
                         charset = response.charset or "utf-8"
-                        html = raw.decode(charset, errors="ignore")
+                        decoded = raw.decode(charset, errors="ignore")
+
+                        if is_json:
+                            try:
+                                payload = json.loads(decoded)
+                            except Exception:
+                                return "抓取异常: 返回了 JSON 类型，但解析 JSON 失败。"
+
+                            json_text = await self._extract_text_from_json_payload(payload)
+                            if not json_text.strip():
+                                return "抓取异常: JSON 返回为空或无可读文本字段。"
+                            return await self._process_fetched_text(json_text)
+
+                        html = decoded
+
+                        abnormal_reason = await self._detect_unextractable_page_reason(html)
+                        if abnormal_reason:
+                            return f"抓取异常: {abnormal_reason}"
                         break
                 else:
                     return "抓取网页失败：重定向次数超过限制。"
 
-            doc = Document(html)
-            summary_html = doc.summary(html_partial=True)
-            soup = BeautifulSoup(summary_html, "html.parser")
-            text = await self._tidy_text(soup.get_text(" ", strip=True))
+            text = await self._extract_best_text_from_html(html)
             if not text:
                 return "网页内容为空或无法提取正文。"
             return await self._process_fetched_text(text)
@@ -798,7 +927,14 @@ class ToolboxPlugin(Star):
 
         result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
         for tool in matched[:10]:
-            result_lines.append(f"- {tool['name']}: {tool['description'][:60]}...")
+            params = tool.get("parameters", {}) if isinstance(tool, dict) else {}
+            props = params.get("properties", {}) if isinstance(params, dict) else {}
+            param_keys = list(props.keys()) if isinstance(props, dict) else []
+            params_text = ", ".join(param_keys) if param_keys else "无"
+            result_lines.append(
+                f"- {tool['name']}: {tool['description'][:60]}...\n"
+                f"  参数: {params_text}"
+            )
 
         return {"status": "success", "message": "\n".join(result_lines), "tools": matched}
 
@@ -817,7 +953,7 @@ class ToolboxPlugin(Star):
             required_text = "无"
             if required:
                 required_text = ", ".join(str(r) for r in required)
-            arg_keys = list(properties.keys())[:6] if isinstance(properties, dict) else []
+            arg_keys = list(properties.keys()) if isinstance(properties, dict) else []
             args_text = ", ".join(arg_keys) if arg_keys else "无"
             tools_list.append(
                 f"- {name}: {meta.get('description', '')}\n"
@@ -1020,8 +1156,9 @@ class ToolboxPlugin(Star):
         else:
             # 未显式传 full_history 时，按 args(days)自动决策：>3天默认压缩，<=3天默认全量
             full_history = days <= 3
-        lang = str(args.get("lang", "") or "").strip()
-        unit = str(args.get("unit", "") or "").strip().lower()
+        # 标准化内部参数：历史天气接口统一使用中文与公制单位，不对外暴露配置。
+        lang = "zh"
+        unit = "m"
         summary_instruction = self._resolve_summary_instruction(args)
 
         api_type = "historical/weather" if history_type == "weather" else "historical/air"
