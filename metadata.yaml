@@ -1,6 +1,6 @@
 name: astrbot_plugin_toolbox_for_koko
 display_name: Koko的多功能工具箱
-desc: 为 Koko 提供的多功能AI工具箱，集成和风天气预测、智谱联网搜索以及群聊/历史消息提取等增强功能。
-version: 0.0.2
+desc: 为 Koko 提供的多功能工具箱，集成和风天气预测、智谱联网搜索以及群聊/历史消息提取等增强功能。
+version: 0.2.0
 author: coco
 repo: https://github.com/coco292931/astrbot_plugin_toolbox_for_koko

@@ -50,13 +50,17 @@ def _load_schema_defaults() -> dict:
 
 
 def _extract_grouped_runtime_config(raw: dict) -> dict:
-    """只读取新分组配置结构（weather/search/web_fetch）并拍平成运行时键值。"""
+    """只读取新的分组配置结构，并拍平成运行时键值；本次更新补充支持 interaction 配置组。"""
     if not isinstance(raw, dict):
         return {}
 
     incoming = {}
 
-    for key in ("enable_weather", "enable_search", "enable_history"):
+    for key in (
+        "enable_weather",
+        "enable_search",
+        "enable_history",
+    ):
         if key in raw:
             incoming[key] = raw.get(key)
 
@@ -95,12 +99,22 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             if key in web_fetch_cfg:
                 incoming[key] = web_fetch_cfg.get(key)
 
+    interaction_cfg = raw.get("interaction", {})
+    if isinstance(interaction_cfg, dict):
+        for key in (
+            "enable_keyword_capture_reply",
+            "keyword_capture_words",
+            "keyword_capture_reply_probability",
+        ):
+            if key in interaction_cfg:
+                incoming[key] = interaction_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.1.0")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.2.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -128,6 +142,18 @@ class ToolboxPlugin(Star):
         self.enable_search = self.config.get("enable_search", True)
         self.enable_history = self.config.get("enable_history", True)
         self.enable_fetch_url = self.config.get("enable_fetch_url", True)
+        self.enable_keyword_capture_reply = self._safe_bool(
+            self.config.get("enable_keyword_capture_reply", False), False
+        )
+        self.keyword_capture_reply_probability = self._safe_float(
+            self.config.get("keyword_capture_reply_probability", 0.7),
+            0.7,
+            0.0,
+            1.0,
+        )
+        self.keyword_capture_words = self._parse_keywords(
+            self.config.get("keyword_capture_words", [])
+        )
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(self.config.get("fetch_url_max_chars"), 6000, 200, 200000)
@@ -177,6 +203,80 @@ class ToolboxPlugin(Star):
             if text in {"0", "false", "no", "n", "off"}:
                 return False
         return default
+
+    def _safe_float(self, value, default: float, min_v: float, max_v: float) -> float:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(min_v, min(num, max_v))
+
+    def _parse_keywords(self, raw_value: Any) -> list[str]:
+        """解析关键词列表，仅接受 list[str]。"""
+        if not isinstance(raw_value, list):
+            return []
+        items = [str(v).strip() for v in raw_value if str(v).strip()]
+        # 去重并保持顺序
+        return list(dict.fromkeys(items))
+
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
+        priority=99,
+    )
+    async def keyword_capture_reply_handler(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ):
+        """关键词捕捉回复：命中关键词后按概率直接调用大模型回复用户原消息。"""
+        try:
+            if not self.enable_keyword_capture_reply:
+                return
+
+            # Ignore the bot's own messages to avoid responding to itself.
+            if event.get_sender_id() == event.get_self_id():
+                return
+
+            message_text = (event.get_message_outline() or "").strip()
+            if not message_text:
+                return
+
+            if not self.keyword_capture_words:
+                return
+
+            if not any(word in message_text for word in self.keyword_capture_words):
+                return
+
+            roll = random.random()
+            if roll > self.keyword_capture_reply_probability:
+                logger.debug(
+                    "[keyword_capture_reply] 关键词命中但未通过概率门限: "
+                    f"roll={roll:.4f}, p={self.keyword_capture_reply_probability:.4f}"
+                )
+                return
+
+            conv_mgr = self.context.conversation_manager
+            curr_cid = await conv_mgr.get_curr_conversation_id(event.unified_msg_origin)
+            if not curr_cid:
+                curr_cid = await conv_mgr.new_conversation(
+                    event.unified_msg_origin,
+                    platform_id=event.get_platform_id(),
+                )
+
+            conversation = None
+            if curr_cid:
+                conversation = await conv_mgr.get_conversation(
+                    event.unified_msg_origin,
+                    curr_cid,
+                )
+
+            # 直接使用用户原消息作为 prompt，不做提示词注入/替换。
+            yield event.request_llm(
+                prompt=message_text,
+                session_id=curr_cid or "",
+                conversation=conversation,
+            )
+            event.stop_event()
+        except Exception as e:
+            logger.debug(f"[keyword_capture_reply] 处理失败: {e}")
 
     def _parse_blocked_targets(self, raw_value) -> list[str]:
         """解析配置中的禁用目标列表，支持 host/ip 的 list 或 JSON 字符串数组。"""
@@ -1104,13 +1204,14 @@ class ToolboxPlugin(Star):
 
                 result = await client.call_action('get_friend_msg_history', user_id=target_id, message_seq=message_seq, count=min(count, 100))
 
-            # 统一解析返回结构
+            logger.debug(f"历史消息接口返回: {result}")
+            print(f"历史消息接口返回: {result}")
             messages = result.get('data', {}).get('messages', [])
             if not messages:
                 return "暂无历史消息记录"
 
             # 拼装返回摘要文字
-            title = f"📜 群 {target_id} 历史消息" if mode == "group" else f"📜 好友 {target_id} 历史消息"
+            title = f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
             lines = [f"{title}（拉取到 {len(messages)} 条）："]
             
             for msg in messages:

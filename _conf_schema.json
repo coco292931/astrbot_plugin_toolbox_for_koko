@@ -101,6 +101,9 @@
                 "description": "网页抓取禁用目标列表",
                 "hint": "默认为空。可混合填写 Host/IP，如 \"localhost\",\"metadata.google.internal\",\"169.254.169.254\"等。",
                 "type": "list",
+                "items": {
+                    "type": "string"
+                },
                 "default": ["localhost"]
             },
             "fetch_url_max_redirects": {
@@ -143,5 +146,38 @@
         "hint": "关闭后不可读取群聊/私聊历史消息。",
         "type": "bool",
         "default": true
+    },
+    "interaction": {
+        "description": "交互触发配置",
+        "type": "object",
+        "hint": "配置关键词捕捉后的回复行为。",
+        "items": {
+            "enable_keyword_capture_reply": {
+                "description": "启用关键词捕捉回复",
+                "hint": "开启后，消息命中关键词时会尝试自动回复。",
+                "type": "bool",
+                "default": false
+            },
+            "keyword_capture_words": {
+                "description": "关键词列表",
+                "hint": "请直接填写列表，例如 [\"koko\", \"可可\"]。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": ["koko", "可可"]
+            },
+            "keyword_capture_reply_probability": {
+                "description": "触发后回复概率",
+                "hint": "范围 0~1，例如 0.7 表示命中关键词后有 70% 概率回复。",
+                "type": "float",
+                "default": 0.7,
+                "slider": {
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.05
+                }
+            }
+        }
     }
 }

@@ -4,7 +4,8 @@
 
 ## ✨ 功能特性
 
-- 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可生成亲切的天气简报。
+- 💬 **关键词随机捕捉响应 (Interaction)**：监听特定关键词并按自定义概率触发对话回复，活跃群聊氛围。
+- 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可直传原始 JSON 给大模型生成亲切的天气简报。
 - 🔍 **智能联网网页搜索**：集成智谱大模型搜索接口。支持普通/深度搜索、多粒度摘要提取、时效性过滤。
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
   - **SSRF 深度防御**：自动阻止私有 IP、本地回环及云平台元数据地址，防止内网穿透。
@@ -30,7 +31,13 @@
 
 - **enable_fetch_url**: 是否启用网页抓取工具。
 - **fetch_url_over_limit_mode**: 超限策略 (`truncate` | `ai_summary` | `full`)。
-- **fetch_url_blocked_targets**: 额外禁用的 Host/IP 列表 (JSON 数组)。
+- **fetch_url_blocked_targets**: 额外禁用的 Host/IP 列表 (JSON 数组或列表)。
+
+### 💬 交互触发 (interaction)
+
+- **enable_keyword_capture_reply**: 开启后，消息命中关键词时会尝试自动回复。
+- **keyword_capture_words**: 触发回复的关键词列表（如 `["koko", "可可"]`）。
+- **keyword_capture_reply_probability**: 命中后回复的概率（`0` ~ `1.0`）。
 
 ## 🚀 智能化工具调用机制
 
