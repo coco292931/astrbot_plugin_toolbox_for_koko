@@ -1,6 +1,6 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko)
 
-> AstrBot 专属增强插件，为机器人提供丰富的内置能力集，包含天气查询、强大的搜索引擎、**网页抓取**，并且支持提取群聊与好友的历史记录以复盘上下文。
+> AstrBot 专属增强插件，为机器人提供丰富的内置能力集，包含天气查询、强大的搜索引擎、网页抓取，并且支持提取群聊与好友的历史记录以复盘上下文。
 
 ## ✨ 功能特性
 
@@ -16,15 +16,18 @@
 请在 AstrBot 后台管理面板中按分组配置：
 
 ### 🌤️ 天气 (weather)
+
 - **qweather_jwt_token / qweather_key**: 和风天气认证信息。
 - **enable_weather_summary**: 开启后可调用 LLM 总结 7 日预报。
 - **weather_summary_llm_provider_id**: 指定用于天总结的模型 Provider ID。
 
 ### 🔍 搜索 (search)
+
 - **zhipu_key**: 智谱官方 API 密钥。
 - **zhipu_search_model**: 联网搜索使用的模型 (如 `glm-4.7-flash`)。
 
 ### 🌐 网页抓取 (web_fetch)
+
 - **enable_fetch_url**: 是否启用网页抓取工具。
 - **fetch_url_over_limit_mode**: 超限策略 (`truncate` | `ai_summary` | `full`)。
 - **fetch_url_blocked_targets**: 额外禁用的 Host/IP 列表 (JSON 数组)。
@@ -47,5 +50,3 @@
 
 - Weather: `https://{weather_host}/v7/weather/...`
 - Geo: `https://{geo_host}/geo/v2/city/lookup?...`
-
-说明：Geo 查询路径使用 `/v2/city/lookup`（不是 `/geo/v2/city/lookup`）。

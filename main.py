@@ -134,7 +134,7 @@ class ToolboxPlugin(Star):
         self.fetch_url_over_limit_mode = str(self.config.get("fetch_url_over_limit_mode", "truncate") or "truncate").strip().lower()
         if self.fetch_url_over_limit_mode not in {"truncate", "ai_summary", "full"}:
             self.fetch_url_over_limit_mode = "truncate"
-        summary_prompt_default = "请根据系统提供的数据生成简短、准确、友好的总结。"
+        summary_prompt_default = "请你作为一名资深气象分析师，根据系统提供的多日天气数据，生成一份简短、口语化、亲切友好的天气趋势总结。"
         self.summary_prompt = self.config.get(
             "summary_prompt",
             self.config.get(
@@ -789,17 +789,23 @@ class ToolboxPlugin(Star):
             
             # --- 7日天气处理 ---
             if query_type == "7d" and not full_7d and self.enable_weather_summary:
-                summary_raw = "\n".join([f"{day['fxDate']}: 白天{day['textDay']} 夜间{day['textNight']}, {day['tempMin']}~{day['tempMax']}°C" for day in data.get("daily", [])])
                 if self.weather_summary_llm_provider_id:
                     try:
-                        prompt = f"{self.weather_summary_prompt}\n\n原始7日天气:\n{summary_raw}"
+                        raw_payload = json.dumps(data, ensure_ascii=False)
+                        prompt = (
+                            f"{self.weather_summary_prompt}\n\n"
+                            "以下是天气接口返回的原始JSON数据（未经修改或删减），请直接基于该原始数据总结：\n"
+                            f"{raw_payload}"
+                        )
                         ai_resp = await self.context.llm_generate(
                             chat_provider_id=self.weather_summary_llm_provider_id,
                             prompt=prompt,
                         )
                         return ai_resp
                     except Exception:
-                        logger.warning("7日天气LLM压缩失败，回退为原始精简文本。")
+                        logger.warning("7日天气LLM压缩失败，回退为本地精简文本。")
+
+                summary_raw = "\n".join([f"{day['fxDate']}: 白天{day['textDay']} 夜间{day['textNight']}, {day['tempMin']}~{day['tempMax']}°C" for day in data.get("daily", [])])
                 return f"【系统提示: 已精简7日天气数据】\n{summary_raw}\n【系统行为指令】: {self.weather_summary_prompt}"
             
             # --- 生活指数处理 ---
@@ -860,6 +866,29 @@ class ToolboxPlugin(Star):
                 historical_list.append(day_data)
 
             if not full_history and self.enable_weather_summary:
+                if self.weather_summary_llm_provider_id:
+                    try:
+                        raw_payload = json.dumps(
+                            {
+                                "history_type": history_type,
+                                "days": days,
+                                "location": location_id,
+                                "historical": historical_list,
+                            },
+                            ensure_ascii=False,
+                        )
+                        prompt = (
+                            f"{self.weather_summary_prompt}\n\n"
+                            f"以下是最近{days}天(不含今天)的历史{('天气' if history_type == 'weather' else '空气质量')}原始JSON数据（未经修改或删减），请直接基于原始数据总结：\n{raw_payload}"
+                        )
+                        ai_resp = await self.context.llm_generate(
+                            chat_provider_id=self.weather_summary_llm_provider_id,
+                            prompt=prompt,
+                        )
+                        return ai_resp
+                    except Exception:
+                        logger.warning("历史数据LLM压缩失败，回退为本地精简文本。")
+
                 summary_lines = []
                 for day_data in historical_list:
                     if history_type == "weather":
@@ -903,19 +932,6 @@ class ToolboxPlugin(Star):
                             )
 
                 summary_raw = "\n".join(summary_lines) if summary_lines else "无可用历史数据摘要。"
-                if self.weather_summary_llm_provider_id:
-                    try:
-                        prompt = (
-                            f"{self.weather_summary_prompt}\n\n"
-                            f"以下是最近{days}天(不含今天)的历史{('天气' if history_type == 'weather' else '空气质量')}数据精简：\n{summary_raw}"
-                        )
-                        ai_resp = await self.context.llm_generate(
-                            chat_provider_id=self.weather_summary_llm_provider_id,
-                            prompt=prompt,
-                        )
-                        return ai_resp
-                    except Exception:
-                        logger.warning("历史数据LLM压缩失败，回退为原始精简文本。")
 
                 return (
                     f"【系统提示: 已精简最近{days}天历史{('天气' if history_type == 'weather' else '空气质量')}数据】\n"
