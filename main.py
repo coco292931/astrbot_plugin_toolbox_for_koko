@@ -204,6 +204,23 @@ class ToolboxPlugin(Star):
                 return False
         return default
 
+    def _resolve_summary_instruction(self, args: dict) -> str:
+        """生成天气总结指令，支持通过 focus 传入附加关注点。"""
+        focus_text = ""
+        if isinstance(args, dict):
+            focus_text = str(args.get("focus", "")).strip()
+        if not focus_text:
+            return self.weather_summary_prompt
+
+        if len(focus_text) > 120:
+            focus_text = focus_text[:120]
+
+        return (
+            f"{self.weather_summary_prompt}\n"
+            f"。请优先围绕该关注点: {focus_text}\n"
+            "组织总结报告；若与原始数据冲突，优先以原始数据为准。"
+        )
+
     def _extract_llm_text(self, llm_resp: Any) -> str:
         """提取可展示文本，避免透传包含推理/原始响应等敏感字段的对象。"""
         if llm_resp is None:
@@ -378,7 +395,8 @@ class ToolboxPlugin(Star):
                     "properties": {
                         "location": {"type": "string", "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id，或者以英文逗号分隔的经度,纬度坐标如 116.41,39.92"},
                         "query_type": {"type": "string", "description": "查询类型：now(实时)、3d(3日)、7d(7日)、indices_1d(今日生活指数)、indices_3d(3日生活指数)，默认now"},
-                        "full_7d": {"type": "boolean", "description": "仅在 query_type=7d 时生效。true 返回全量原始数据，false 返回精简总结（默认）"}
+                        "full_7d": {"type": "boolean", "description": "仅在 query_type=7d 时生效。true 返回全量原始数据，false 返回精简总结（默认）"},
+                        "focus": {"type": "string", "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞"}
                     },
                     "required": ["location"]
                 },
@@ -397,7 +415,8 @@ class ToolboxPlugin(Star):
                         "days": {"type": "integer", "description": "回溯天数，1-10，默认1"},
                         "full_history": {"type": "boolean", "description": "true 返回全量历史数据，false 返回精简总结，>3d时默认返回精简总结"},
                         "lang": {"type": "string", "description": "语言参数，可选"},
-                        "unit": {"type": "string", "description": "单位参数（weather时可选 m/i）"}
+                        "unit": {"type": "string", "description": "单位参数（weather时可选 m/i）"},
+                        "focus": {"type": "string", "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞"}
                     },
                     "required": ["location"]
                 },
@@ -934,6 +953,7 @@ class ToolboxPlugin(Star):
 
         # 指数API调用（type=0表示获取所有类的生活指数数据）
         extra = "&type=0" if "indices" in query_type else ""
+        summary_instruction = self._resolve_summary_instruction(args)
 
         try:
             data = await self._fetch_qweather(valid_types[query_type], location_id, extra)
@@ -946,7 +966,7 @@ class ToolboxPlugin(Star):
                     try:
                         raw_payload = json.dumps(data, ensure_ascii=False)
                         prompt = (
-                            f"{self.weather_summary_prompt}\n\n"
+                            f"{summary_instruction}\n\n"
                             "以下是天气接口返回的原始JSON数据（未经修改或删减），请直接基于该原始数据总结：\n"
                             f"{raw_payload}"
                         )
@@ -962,7 +982,7 @@ class ToolboxPlugin(Star):
                         logger.warning("7日天气LLM压缩失败，回退为本地精简文本。")
 
                 summary_raw = "\n".join([f"{day['fxDate']}: 白天{day['textDay']} 夜间{day['textNight']}, {day['tempMin']}~{day['tempMax']}°C" for day in data.get("daily", [])])
-                return f"【系统提示: 已精简7日天气数据】\n{summary_raw}\n【系统行为指令】: {self.weather_summary_prompt}"
+                return f"【系统提示: 已精简7日天气数据】\n{summary_raw}\n【系统行为指令】: {summary_instruction}"
             
             # --- 生活指数处理 ---
             if "indices" in query_type:
@@ -1002,6 +1022,7 @@ class ToolboxPlugin(Star):
             full_history = days <= 3
         lang = str(args.get("lang", "") or "").strip()
         unit = str(args.get("unit", "") or "").strip().lower()
+        summary_instruction = self._resolve_summary_instruction(args)
 
         api_type = "historical/weather" if history_type == "weather" else "historical/air"
         historical_list = []
@@ -1034,7 +1055,7 @@ class ToolboxPlugin(Star):
                             ensure_ascii=False,
                         )
                         prompt = (
-                            f"{self.weather_summary_prompt}\n\n"
+                            f"{summary_instruction}\n\n"
                             f"以下是最近{days}天(不含今天)的历史{('天气' if history_type == 'weather' else '空气质量')}原始JSON数据（未经修改或删减），请直接基于原始数据总结：\n{raw_payload}"
                         )
                         ai_resp = await self.context.llm_generate(
@@ -1095,7 +1116,7 @@ class ToolboxPlugin(Star):
                 return (
                     f"【系统提示: 已精简最近{days}天历史{('天气' if history_type == 'weather' else '空气质量')}数据】\n"
                     f"{summary_raw}\n"
-                    f"【系统行为指令】: {self.weather_summary_prompt}"
+                    f"【系统行为指令】: {summary_instruction}"
                 )
 
             return json.dumps({
