@@ -410,7 +410,7 @@ class ToolboxPlugin(Star):
                     "properties": {
                         "mode": {"type": "string", "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断"},
                         "target_id": {"type": "string", "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全"},
-                        "message_seq": {"type": "integer", "description": "分页游标。允许传0（会原样透传）。未传该参数时，group 模式自动使用当前消息 message_id 作为兼容起点；下一页建议使用返回中的 next_message_seq"},
+                        "message_seq": {"type": "integer", "description": "分页游标。允许传0（会原样透传）。未传该参数时默认传0以兼容跨会话查询；同群上下文且接口返回“消息不存在”时会自动尝试当前消息游标兜底。下一页建议使用返回中的 next_message_seq"},
                         "count": {"type": "integer", "description": "返回数量，默认20，范围1-100"}
                     },
                     "required": []
@@ -1240,13 +1240,10 @@ class ToolboxPlugin(Star):
                     return "缺少 target_id：group 模式请提供群号。"
 
                 # 保留 message_seq=0 的原始语义：若调用者显式传入，则原样透传。
-                # 仅在未传 message_seq 时，才使用当前消息 id 作为兼容起点。
+                # 未传 message_seq 时默认使用 0，兼容跨会话（跨群）查询。
                 group_seq = message_seq
                 if not has_message_seq:
-                    try:
-                        group_seq = int(str(getattr(msg_obj, "message_id", "") or "0"))
-                    except Exception:
-                        group_seq = 0
+                    group_seq = 0
 
                 try:
                     result = await client.call_action(
@@ -1256,24 +1253,34 @@ class ToolboxPlugin(Star):
                         count=count,
                     )
                 except Exception as first_err:
-                    # 若仍命中“消息不存在”，再尝试用当前时间戳兜底构造 seq 进行一次重试。
+                    # 若命中“消息不存在”，仅在同群上下文下再尝试本地消息游标兜底。
                     err_text = str(first_err)
-                    if "消息" in err_text and "不存在" in err_text:
+                    same_group_context = bool(context_group_id) and str(context_group_id) == str(target_id)
+                    if "消息" in err_text and "不存在" in err_text and same_group_context:
                         retry_seq = 0
                         try:
-                            retry_seq = int(str(getattr(msg_obj, "timestamp", 0) or 0))
+                            retry_seq = int(str(getattr(msg_obj, "message_id", "") or "0"))
                         except Exception:
                             retry_seq = 0
 
-                        if retry_seq > 0 and retry_seq != group_seq:
-                            result = await client.call_action(
-                                'get_group_msg_history',
-                                group_id=target_id,
-                                message_seq=retry_seq,
-                                count=count,
-                            )
-                        else:
-                            raise
+                        if retry_seq <= 0 or retry_seq == group_seq:
+                            try:
+                                retry_seq = int(str(getattr(msg_obj, "timestamp", 0) or 0))
+                            except Exception:
+                                retry_seq = 0
+
+                        try:
+                            if retry_seq > 0 and retry_seq != group_seq:
+                                result = await client.call_action(
+                                    'get_group_msg_history',
+                                    group_id=target_id,
+                                    message_seq=retry_seq,
+                                    count=count,
+                                )
+                            else:
+                                raise
+                        except Exception:
+                            raise first_err
                     else:
                         raise
             else:
@@ -1285,9 +1292,70 @@ class ToolboxPlugin(Star):
 
             logger.debug(f"历史消息接口返回: {result}")
             print(f"历史消息接口返回: {result}")
-            messages = result.get('data', {}).get('messages', []) if isinstance(result, dict) else []
+
+            # 兼容不同 OneBot 实现返回结构：
+            # - {data: {messages: [...]}}
+            # - {data: [...]}
+            # - {messages: [...]} / {message: [...]} 等
+            messages = []
+            if isinstance(result, dict):
+                data = result.get('data')
+
+                if isinstance(data, dict):
+                    for key in ('messages', 'message', 'list', 'records'):
+                        candidate = data.get(key)
+                        if isinstance(candidate, list):
+                            messages = candidate
+                            break
+                    if not messages and isinstance(data.get('data'), list):
+                        messages = data.get('data', [])
+                elif isinstance(data, list):
+                    messages = data
+
+                if not messages:
+                    for key in ('messages', 'message', 'list', 'records'):
+                        candidate = result.get(key)
+                        if isinstance(candidate, list):
+                            messages = candidate
+                            break
+
+            if isinstance(messages, list):
+                messages = [m for m in messages if isinstance(m, dict)]
+            else:
+                messages = []
+
             if not messages:
-                return "暂无历史消息记录"
+                result_keys = []
+                data_type = type(None).__name__
+                data_keys = []
+                result_preview = ""
+
+                if isinstance(result, dict):
+                    result_keys = list(result.keys())
+                    data_obj = result.get('data')
+                    data_type = type(data_obj).__name__
+                    data_keys = list(data_obj.keys()) if isinstance(data_obj, dict) else []
+
+                try:
+                    result_preview = json.dumps(result, ensure_ascii=False)
+                except Exception:
+                    result_preview = str(result)
+                if len(result_preview) > 800:
+                    result_preview = result_preview[:800] + "..."
+
+                logger.debug(
+                    f"历史消息为空，返回结构摘要: result_keys={result_keys}, "
+                    f"data_type={data_type}, data_keys={data_keys}"
+                )
+
+                return (
+                    "暂无历史消息记录。\n"
+                    "[诊断信息]\n"
+                    f"mode={mode}, target_id={target_id}, message_seq={message_seq}, count={count}\n"
+                    f"result_keys={result_keys}\n"
+                    f"data_type={data_type}, data_keys={data_keys}\n"
+                    f"result_preview={result_preview}"
+                )
 
             # 拼装返回摘要文字
             title = f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
