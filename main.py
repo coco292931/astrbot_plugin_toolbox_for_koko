@@ -408,8 +408,8 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "mode": {"type": "string", "description": "模式：group(群聊) 或 friend(私聊)。不传时自动推断：有 group_id 则 group，否则 friend"},
-                        "target_id": {"type": "string", "description": "目标群号或QQ号；可缺省自动补全：group 使用消息的 group_id，friend 使用 sender.user_id"},
+                        "mode": {"type": "string", "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断"},
+                        "target_id": {"type": "string", "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全"},
                         "message_seq": {"type": "integer", "description": "分页游标。允许传0（会原样透传）。未传该参数时，group 模式自动使用当前消息 message_id 作为兼容起点；下一页建议使用返回中的 next_message_seq"},
                         "count": {"type": "integer", "description": "返回数量，默认20，范围1-100"}
                     },
@@ -1174,9 +1174,10 @@ class ToolboxPlugin(Star):
 
         msg_obj = getattr(event, "message_obj", None)
 
-        # 参数容错：支持字符串数字输入，并对 count 做区间限制。
         raw_mode = str(args.get("mode", "") or "").strip().lower()
-        mode = raw_mode if raw_mode in {"group", "friend"} else ""
+        if raw_mode and raw_mode not in {"group", "friend"}:
+            return "mode 参数无效：仅支持 group 或 friend。"
+        mode = raw_mode
 
         target_id = str(args.get("target_id", "") or "").strip()
 
@@ -1192,11 +1193,33 @@ class ToolboxPlugin(Star):
             count = 20
         count = max(1, min(count, 100))
 
-        group_id = str(getattr(msg_obj, "group_id", "") or "").strip()
+        context_group_id = str(getattr(msg_obj, "group_id", "") or "").strip()
 
-        # mode 缺省时按官方消息字段自动推断：有 group_id 视为群聊，否则视为私聊。
+        sender_user_id = ""
+        sender = getattr(msg_obj, "sender", None)
+        if sender is not None:
+            sender_user_id = str(getattr(sender, "user_id", "") or "").strip()
+        if not sender_user_id:
+            try:
+                sender_user_id = str(event.get_sender_id() or "").strip()
+            except Exception:
+                sender_user_id = ""
+
+        # mode 缺省时按上下文推断。
         if not mode:
-            mode = "group" if group_id else "friend"
+            mode = "group" if context_group_id else "friend"
+
+        # target 缺省时按 mode 从上下文补全。
+        if not target_id:
+            if mode == "group":
+                target_id = context_group_id
+            else:
+                target_id = sender_user_id
+
+        if not target_id:
+            if mode == "group":
+                return "缺少 target_id：group 模式请提供群号，或在群聊上下文中调用。"
+            return "缺少 target_id：friend 模式请提供用户QQ号，或在私聊上下文中调用。"
 
         # 获取底层 OneBot / go_cqhttp 的 client 实例
         client = None
@@ -1214,9 +1237,7 @@ class ToolboxPlugin(Star):
             if mode == "group":
                 # 群聊历史记录
                 if not target_id:
-                    target_id = group_id
-                    if not target_id:
-                        return "缺少目标群号。如果你不在群聊中使用该功能，必须提供 target_id！"
+                    return "缺少 target_id：group 模式请提供群号。"
 
                 # 保留 message_seq=0 的原始语义：若调用者显式传入，则原样透传。
                 # 仅在未传 message_seq 时，才使用当前消息 id 作为兼容起点。
@@ -1258,25 +1279,7 @@ class ToolboxPlugin(Star):
             else:
                 # 好友历史记录
                 if not target_id:
-                    sender = getattr(msg_obj, "sender", None)
-                    sender_user_id = ""
-                    if sender is not None:
-                        sender_user_id = str(getattr(sender, "user_id", "") or "").strip()
-
-                    if sender_user_id:
-                        target_id = sender_user_id
-                    else:
-                        fallback_sender_id = ""
-                        try:
-                            fallback_sender_id = str(event.get_sender_id() or "").strip()
-                        except Exception:
-                            fallback_sender_id = ""
-
-                        if fallback_sender_id:
-                            target_id = fallback_sender_id
-
-                if not target_id:
-                    return "私聊模式下请提供好友的 user_id 或 QQ 号！"
+                    return "缺少 target_id：friend 模式请提供用户QQ号。"
 
                 result = await client.call_action('get_friend_msg_history', user_id=target_id, message_seq=message_seq, count=count)
 
