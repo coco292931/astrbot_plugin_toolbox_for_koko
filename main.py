@@ -204,6 +204,44 @@ class ToolboxPlugin(Star):
                 return False
         return default
 
+    def _extract_llm_text(self, llm_resp: Any) -> str:
+        """提取可展示文本，避免透传包含推理/原始响应等敏感字段的对象。"""
+        if llm_resp is None:
+            return ""
+
+        if isinstance(llm_resp, str):
+            return llm_resp
+
+        if isinstance(llm_resp, list):
+            parts = [self._extract_llm_text(item) for item in llm_resp]
+            return "\n".join([p for p in parts if p]).strip()
+
+        if isinstance(llm_resp, dict):
+            for key in ("text", "content", "message", "result"):
+                value = llm_resp.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+            return ""
+
+        result_chain = getattr(llm_resp, "result_chain", None)
+        if result_chain is not None:
+            chain = getattr(result_chain, "chain", None)
+            if isinstance(chain, list):
+                parts = []
+                for comp in chain:
+                    text = getattr(comp, "text", None)
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                if parts:
+                    return "\n".join(parts).strip()
+
+        for attr in ("text", "content", "message", "result"):
+            value = getattr(llm_resp, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value
+
+        return ""
+
     def _safe_float(self, value, default: float, min_v: float, max_v: float) -> float:
         try:
             num = float(value)
@@ -553,7 +591,11 @@ class ToolboxPlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=prompt,
             )
-            return ai_resp
+            ai_text = self._extract_llm_text(ai_resp)
+            if ai_text:
+                return ai_text
+            logger.warning("网页正文 AI 总结返回非文本或空文本，回退为截断输出。")
+            return f"{truncated}...\n\n[系统提示] AI 总结返回为空，已回退为截断输出。"
         except Exception:
             logger.warning("网页正文 AI 总结失败，回退为截断输出。")
             return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
@@ -793,12 +835,6 @@ class ToolboxPlugin(Star):
             }
 
         normalized_name = name_raw.replace("/", "").strip()
-        available_tools = self._get_available_tools()
-        if normalized_name not in available_tools:
-            return {
-                "status": "error",
-                "message": f"无效的工具名称或工具未启用: {name_raw}。请先使用 search_koko_tools 或 call_koko_tools 获取可用工具。",
-            }
 
         args_dict = {}
         if isinstance(args, dict):
@@ -812,6 +848,21 @@ class ToolboxPlugin(Star):
                     return {"status": "error", "message": "tool_args 必须是 JSON 对象字符串。"}
             except json.JSONDecodeError:
                 return {"status": "error", "message": "参数格式错误，tool_args 必须是有效 JSON 字符串。"}
+
+        # 兼容调用：允许通过 run_koko_tool 转发执行工具搜索/列表接口。
+        if normalized_name == "search_koko_tools":
+            query_text = str(args_dict.get("query", "") or "")
+            return await self.search_koko_tools(event, query=query_text)
+
+        if normalized_name == "call_koko_tools":
+            return await self.call_koko_tools(event)
+
+        available_tools = self._get_available_tools()
+        if normalized_name not in available_tools:
+            return {
+                "status": "error",
+                "message": f"无效的工具名称或工具未启用: {name_raw}。请先使用 search_koko_tools 或 call_koko_tools 获取可用工具。",
+            }
 
         handler = available_tools[normalized_name]["handler"]
         try:
@@ -903,7 +954,10 @@ class ToolboxPlugin(Star):
                             chat_provider_id=self.weather_summary_llm_provider_id,
                             prompt=prompt,
                         )
-                        return ai_resp
+                        ai_text = self._extract_llm_text(ai_resp)
+                        if ai_text:
+                            return ai_text
+                        logger.warning("7日天气LLM压缩返回非文本或空文本，回退为本地精简文本。")
                     except Exception:
                         logger.warning("7日天气LLM压缩失败，回退为本地精简文本。")
 
@@ -987,7 +1041,10 @@ class ToolboxPlugin(Star):
                             chat_provider_id=self.weather_summary_llm_provider_id,
                             prompt=prompt,
                         )
-                        return ai_resp
+                        ai_text = self._extract_llm_text(ai_resp)
+                        if ai_text:
+                            return ai_text
+                        logger.warning("历史数据LLM压缩返回非文本或空文本，回退为本地精简文本。")
                     except Exception:
                         logger.warning("历史数据LLM压缩失败，回退为本地精简文本。")
 
