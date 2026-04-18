@@ -104,7 +104,7 @@
                 "items": {
                     "type": "string"
                 },
-                "default": ["localhost"]
+                "default": []
             },
             "fetch_url_max_redirects": {
                 "description": "网页重定向次数上限",
@@ -118,6 +118,12 @@
                 "hint": "超出该长度后按输出策略处理。建议 2000-12000。",
                 "type": "int",
                 "default": 6000
+            },
+            "fetch_url_max_download_bytes": {
+                "description": "网页下载字节上限",
+                "hint": "单次抓取允许下载的最大字节数，超限会提前终止。默认 6MB。",
+                "type": "int",
+                "default": 6291456
             },
             "fetch_url_over_limit_mode": {
                 "description": "网页正文超限策略",

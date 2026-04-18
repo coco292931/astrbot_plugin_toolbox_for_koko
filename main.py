@@ -60,6 +60,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
         "enable_weather",
         "enable_search",
         "enable_history",
+        "enable_fetch_url",
     ):
         if key in raw:
             incoming[key] = raw.get(key)
@@ -161,14 +162,15 @@ class ToolboxPlugin(Star):
         if self.fetch_url_over_limit_mode not in {"truncate", "ai_summary", "full"}:
             self.fetch_url_over_limit_mode = "truncate"
         summary_prompt_default = "请你作为一名资深气象分析师，根据系统提供的多日天气数据，生成一份简短、口语化、亲切友好的天气趋势总结。"
+        fetch_url_summary_prompt_default = "请根据以下网页正文提炼关键信息，给出准确、简洁的中文总结。"
         self.summary_prompt = self.config.get(
             "summary_prompt",
-            self.config.get(
-                "weather_summary_prompt",
-                self.config.get("fetch_url_summary_prompt", summary_prompt_default),
-            ),
+            self.config.get("weather_summary_prompt", summary_prompt_default),
         )
-        self.fetch_url_summary_prompt = self.summary_prompt
+        self.fetch_url_summary_prompt = self.config.get(
+            "fetch_url_summary_prompt",
+            fetch_url_summary_prompt_default,
+        )
         self.fetch_url_summary_llm_provider_id = self.config.get("fetch_url_summary_llm_provider_id", "")
         self.fetch_url_blocked_targets = self._parse_blocked_targets(
             self.config.get("fetch_url_blocked_targets", [])
@@ -353,12 +355,11 @@ class ToolboxPlugin(Star):
 
         valid_targets = []
         for item in items:
-            target_text = str(item).strip().lower()
+            target_text = str(item).strip().lower().rstrip(".")
             if not target_text:
                 continue
             try:
-                ipaddress.ip_address(target_text)
-                valid_targets.append(target_text)
+                valid_targets.append(str(ipaddress.ip_address(target_text)))
             except ValueError:
                 valid_targets.append(target_text)
 
@@ -449,7 +450,8 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"}
+                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"},
+                        "skip_filter": {"type": "boolean", "description": "是否跳过正文提取过滤并直接返回原始响应文本，默认 false。用于前端渲染/挑战页排障"}
                     },
                     "required": ["url"]
                 },
@@ -637,7 +639,7 @@ class ToolboxPlugin(Star):
         if not parsed.netloc:
             return False, "url 缺少域名。"
 
-        host = (parsed.hostname or "").strip().lower()
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
         if not host:
             return False, "url 域名无效。"
 
@@ -647,7 +649,25 @@ class ToolboxPlugin(Star):
             "metadata.azure.internal",
         }
         deny_targets = set(self.fetch_url_blocked_targets)
-        if host in deny_host or host.endswith(".local") or host in deny_targets:
+        deny_ip_targets = set()
+        deny_domain_targets = set()
+        for target in deny_targets:
+            try:
+                deny_ip_targets.add(str(ipaddress.ip_address(target)))
+            except ValueError:
+                deny_domain_targets.add(str(target).strip().lower().rstrip("."))
+
+        def _host_denied(hostname: str) -> bool:
+            if hostname in deny_host or hostname.endswith(".local"):
+                return True
+            if hostname in deny_domain_targets:
+                return True
+            for blocked_domain in deny_domain_targets:
+                if blocked_domain and hostname.endswith(f".{blocked_domain}"):
+                    return True
+            return False
+
+        if _host_denied(host):
             return False, "目标地址已被管理员禁止访问。"
 
         def _bad_ip(ip_str: str) -> bool:
@@ -655,7 +675,7 @@ class ToolboxPlugin(Star):
                 ip = ipaddress.ip_address(ip_str)
             except ValueError:
                 return True
-            if ip_str in deny_targets:
+            if str(ip) in deny_ip_targets:
                 return True
             return (
                 ip.is_private
@@ -708,7 +728,7 @@ class ToolboxPlugin(Star):
         if mode == "truncate":
             return f"{truncated}...\n\n[系统提示] 网页正文超长，已按配置截断。"
 
-        provider_id = self.fetch_url_summary_llm_provider_id or self.weather_summary_llm_provider_id
+        provider_id = self.fetch_url_summary_llm_provider_id
         if not provider_id:
             return f"{truncated}...\n\n[系统提示] 未配置 fetch_url_summary_llm_provider_id，已回退为截断输出。"
 
@@ -727,7 +747,7 @@ class ToolboxPlugin(Star):
             logger.warning("网页正文 AI 总结失败，回退为截断输出。")
             return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
 
-    async def _get_from_url(self, url: str) -> str:
+    async def _get_from_url(self, url: str, skip_filter: bool = False) -> str:
         """抓取并提取网页正文。"""
         user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -781,6 +801,9 @@ class ToolboxPlugin(Star):
 
                         charset = response.charset or "utf-8"
                         decoded = raw.decode(charset, errors="ignore")
+
+                        if skip_filter:
+                            return await self._process_fetched_text(decoded)
 
                         if is_json:
                             try:
@@ -1028,11 +1051,12 @@ class ToolboxPlugin(Star):
             return {"status": "error", "message": f"工具执行出错: {str(e)}"}
 
     @llm_tool(name="koko_fetch_url")
-    async def fetch_website_content(self, event: AstrMessageEvent, url: str) -> str:
+    async def fetch_website_content(self, event: AstrMessageEvent, url: str, skip_filter: bool = False) -> str:
         """Fetch the content of a website with the given web url.
 
         Args:
             url(string): The url of the website to fetch content from
+            skip_filter(boolean): Whether to bypass extraction and return raw response text.
 
         """
         if not self.enable_fetch_url:
@@ -1041,7 +1065,7 @@ class ToolboxPlugin(Star):
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
-        return await self._get_from_url(normalized_url)
+        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
@@ -1053,7 +1077,7 @@ class ToolboxPlugin(Star):
                 "3. 确认工具名后，调用 run_koko_tool，并使用 tool_name + tool_args(JSON字符串)。\n"
                 "禁止跳过搜索直接猜测工具名。"
             )
-            guide_text = ()
+            guide_text = () # 故意的，别删
 
             if hasattr(request, "system_prompt") and request.system_prompt:
                 if guide_text not in request.system_prompt:
@@ -1376,12 +1400,13 @@ class ToolboxPlugin(Star):
         url = str(args.get("url", "") or "").strip()
         if not url:
             return "缺少 url 参数。"
+        skip_filter = self._safe_bool(args.get("skip_filter", False), False)
 
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
 
-        return await self._get_from_url(normalized_url)
+        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
 
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
