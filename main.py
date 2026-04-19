@@ -207,6 +207,15 @@ class ToolboxPlugin(Star):
                 return False
         return default
 
+    def _parse_llm_compress_mode(self, value) -> str | None:
+        if value is None:
+            return "inherit"
+        if isinstance(value, str):
+            mode = value.strip().lower()
+            if mode in {"inherit", "summary", "truncate"}:
+                return mode
+        return None
+
     def _resolve_summary_instruction(self, args: dict) -> str:
         """生成天气总结指令，支持通过 focus 传入附加关注点。"""
         focus_text = ""
@@ -451,7 +460,12 @@ class ToolboxPlugin(Star):
                     "type": "object",
                     "properties": {
                         "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"},
-                        "skip_filter": {"type": "boolean", "description": "是否跳过正文提取过滤并直接返回原始响应文本，默认 false。用于前端渲染/挑战页排障"}
+                        "skip_filter": {"type": "boolean", "description": "开关：false(默认)=增强抓取逻辑；true=原版 fetch_url 逻辑。"},
+                        "llm_compress": {
+                            "type": "string",
+                            "enum": ["inherit", "summary", "truncate"],
+                            "description": "可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。"
+                        }
                     },
                     "required": ["url"]
                 },
@@ -612,12 +626,12 @@ class ToolboxPlugin(Star):
         """识别当前抓取链路难以提取正文的页面特征，并返回原因。"""
         lowered = html.lower()
 
-        # Cloudflare challenge 或类似挑战页。
-        if "challenge-platform" in lowered or "__cf$cv$params" in lowered:
-            return "页面触发了反爬/挑战验证，当前抓取方式无法直接获取正文。"
-
         soup = BeautifulSoup(html, "html.parser")
         body_text = await self._tidy_text(soup.get_text(" ", strip=True))
+
+        # Cloudflare challenge 或类似挑战页（仅在正文几乎为空时才判定，避免误杀可读页面）。
+        if ("challenge-platform" in lowered or "__cf$cv$params" in lowered) and len(body_text) < 500:
+            return "页面触发了反爬/挑战验证，当前抓取方式无法直接获取正文。"
 
         app_container = soup.find(id="app")
         app_container_empty = False
@@ -631,6 +645,36 @@ class ToolboxPlugin(Star):
             return "页面疑似前端渲染(SPA)壳页，原始 HTML 不包含正文内容。"
 
         return None
+
+    async def _get_from_url_legacy(self, url: str, llm_compress: str = "inherit") -> str:
+        """原版 AstrBot web_searcher 的 fetch_url 提取逻辑。"""
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ]
+        headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    return f"抓取网页失败，状态码: {response.status}"
+
+                html = await response.text(encoding="utf-8", errors="ignore")
+                doc = Document(html)
+                ret = doc.summary(html_partial=True)
+                soup = BeautifulSoup(ret, "html.parser")
+                text = await self._tidy_text(soup.get_text())
+                if not text:
+                    return "网页内容为空或无法提取正文。"
+                return await self._process_fetched_text(text, llm_compress=llm_compress)
 
     async def _validate_fetch_url(self, url: str) -> tuple[bool, str]:
         parsed = urllib.parse.urlparse(url)
@@ -716,11 +760,17 @@ class ToolboxPlugin(Star):
             return False, "", err
         return True, url_clean, ""
 
-    async def _process_fetched_text(self, text: str) -> str:
+    async def _process_fetched_text(self, text: str, llm_compress: str = "inherit") -> str:
         if len(text) <= self.fetch_url_max_chars:
             return text
 
         mode = self.fetch_url_over_limit_mode
+        # 默认 inherit 按用户配置；传入 summary/truncate 时按本次调用意图覆盖。
+        if llm_compress == "summary":
+            mode = "ai_summary"
+        elif llm_compress == "truncate":
+            mode = "truncate"
+
         if mode == "full":
             return text
 
@@ -747,8 +797,16 @@ class ToolboxPlugin(Star):
             logger.warning("网页正文 AI 总结失败，回退为截断输出。")
             return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
 
-    async def _get_from_url(self, url: str, skip_filter: bool = False) -> str:
+    async def _get_from_url(
+        self,
+        url: str,
+        use_legacy: bool = False,
+        llm_compress: str = "inherit",
+    ) -> str:
         """抓取并提取网页正文。"""
+        if use_legacy:
+            return await self._get_from_url_legacy(url, llm_compress=llm_compress)
+
         user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -802,9 +860,6 @@ class ToolboxPlugin(Star):
                         charset = response.charset or "utf-8"
                         decoded = raw.decode(charset, errors="ignore")
 
-                        if skip_filter:
-                            return await self._process_fetched_text(decoded)
-
                         if is_json:
                             try:
                                 payload = json.loads(decoded)
@@ -814,7 +869,7 @@ class ToolboxPlugin(Star):
                             json_text = await self._extract_text_from_json_payload(payload)
                             if not json_text.strip():
                                 return "抓取异常: JSON 返回为空或无可读文本字段。"
-                            return await self._process_fetched_text(json_text)
+                            return await self._process_fetched_text(json_text, llm_compress=llm_compress)
 
                         html = decoded
 
@@ -828,7 +883,7 @@ class ToolboxPlugin(Star):
             text = await self._extract_best_text_from_html(html)
             if not text:
                 return "网页内容为空或无法提取正文。"
-            return await self._process_fetched_text(text)
+            return await self._process_fetched_text(text, llm_compress=llm_compress)
         except asyncio.TimeoutError:
             return "抓取网页超时。"
         except aiohttp.ClientError as e:
@@ -917,11 +972,11 @@ class ToolboxPlugin(Star):
     # ---------------- 工具暴露 ----------------
     @llm_tool("search_koko_tools")
     async def search_koko_tools(self, event: AstrMessageEvent, query: str = "", **kwargs) -> dict:
-        """【必须优先使用】根据简短关键词搜索匹配工具。请使用短语，不要使用完整问句。"""
+        """【必须优先使用】根据简短关键词搜索匹配工具。兼容 query/keywords 两种入参。"""
         if (not query or not str(query).strip()) and isinstance(kwargs, dict):
-            query = str(kwargs.get("query", "") or "")
+            query = str(kwargs.get("query", "") or kwargs.get("keywords", "") or "")
         if not query or not query.strip():
-            return {"status": "error", "message": "请提供搜索关键词（如“天气”、“搜索”、“历史消息”）"}
+            return {"status": "error", "message": "请提供搜索关键词（参数 query 或 keywords，如“天气”、“搜索”、“历史消息”）"}
 
         available_tools = self._get_available_tools()
         query_lower = query.strip().lower()
@@ -945,7 +1000,7 @@ class ToolboxPlugin(Star):
         if not matched:
             return {
                 "status": "success",
-                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。",
+                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词（query 或 keywords）或使用 call_koko_tools 查看全部可用工具。",
             }
 
         result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
@@ -1051,12 +1106,19 @@ class ToolboxPlugin(Star):
             return {"status": "error", "message": f"工具执行出错: {str(e)}"}
 
     @llm_tool(name="koko_fetch_url")
-    async def fetch_website_content(self, event: AstrMessageEvent, url: str, skip_filter: bool = False) -> str:
+    async def fetch_website_content(
+        self,
+        event: AstrMessageEvent,
+        url: str,
+        skip_filter: bool = False,
+        llm_compress: str = "inherit",
+    ) -> str:
         """Fetch the content of a website with the given web url.
 
         Args:
             url(string): The url of the website to fetch content from
-            skip_filter(boolean): Whether to bypass extraction and return raw response text.
+            skip_filter(boolean): 开关：false(默认)=增强抓取逻辑；true=原版 fetch_url 逻辑。
+            llm_compress(string): 可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。
 
         """
         if not self.enable_fetch_url:
@@ -1065,7 +1127,14 @@ class ToolboxPlugin(Star):
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
-        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
+        llm_compress_mode = self._parse_llm_compress_mode(llm_compress)
+        if llm_compress_mode is None:
+            return "llm_compress 参数无效：仅支持 inherit、summary、truncate。"
+        return await self._get_from_url(
+            normalized_url,
+            use_legacy=self._safe_bool(skip_filter, False),
+            llm_compress=llm_compress_mode,
+        )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
@@ -1402,11 +1471,21 @@ class ToolboxPlugin(Star):
             return "缺少 url 参数。"
         skip_filter = self._safe_bool(args.get("skip_filter", False), False)
 
+        llm_compress = "inherit"
+        if "llm_compress" in args:
+            llm_compress = self._parse_llm_compress_mode(args.get("llm_compress"))
+            if llm_compress is None:
+                return "llm_compress 参数无效：仅支持 inherit、summary、truncate。"
+
         ok, normalized_url, err = await self._normalize_and_validate_fetch_url(url)
         if not ok:
             return err
 
-        return await self._get_from_url(normalized_url, skip_filter=skip_filter)
+        return await self._get_from_url(
+            normalized_url,
+            use_legacy=skip_filter,
+            llm_compress=llm_compress,
+        )
 
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
