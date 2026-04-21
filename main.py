@@ -487,6 +487,7 @@ class ToolboxPlugin(Star):
                         "mode": {"type": "string", "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断"},
                         "target_id": {"type": "string", "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全"},
                         "page": {"type": "integer", "description": "本地分页页码，默认1"},
+                        "refresh": {"type": "boolean", "description": "是否强制刷新历史缓存。true 时忽略旧缓存，从最新数据重新拉取"},
                         "count": {"type": "integer", "description": "每页返回数量（page_size），默认20，范围1-100"}
                     },
                     "required": []
@@ -1492,9 +1493,9 @@ class ToolboxPlugin(Star):
             llm_compress=llm_compress,
         )
 
-    def _history_make_cache_key(self, event: AstrMessageEvent, mode: str, target_id: str, page_size: int) -> str:
-        origin = str(getattr(event, "unified_msg_origin", "") or "")
-        return f"{origin}|{mode}|{target_id}|{page_size}"
+    def _history_make_cache_key(self, mode: str, target_id: str, page_size: int) -> str:
+        # 不绑定 unified_msg_origin，避免同一目标在不同会话触发时缓存断档。
+        return f"{mode}|{target_id}|{page_size}"
 
     def _history_prune_cache(self) -> None:
         now_ts = int(datetime.now().timestamp())
@@ -1565,6 +1566,16 @@ class ToolboxPlugin(Star):
         except Exception:
             return "--:--"
 
+    def _history_sort_key_desc(self, msg: dict) -> tuple[int, int]:
+        """用于本地分页排序：按 time、seq 倒序（最新优先）。"""
+        ts_num = 0
+        try:
+            ts_num = int(str(msg.get("time", 0) or 0))
+        except Exception:
+            ts_num = 0
+        seq_num = self._history_pick_seq(msg)
+        return ts_num, seq_num
+
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
             return "历史查询功能已被禁用。"
@@ -1583,6 +1594,7 @@ class ToolboxPlugin(Star):
         except Exception:
             page = 1
         page = max(1, page)
+        refresh = self._safe_bool(args.get("refresh", False), False)
 
         try:
             count = int(args.get("count", 20))
@@ -1632,11 +1644,11 @@ class ToolboxPlugin(Star):
             # 如果我们找不到支持 call_action 的属性，则通知大模型获取失败
             return "无法获取客户端 adapter，该端点可能不支持原生 call_action()。"
 
-        cache_key = self._history_make_cache_key(event, mode, target_id, page_size)
+        cache_key = self._history_make_cache_key(mode, target_id, page_size)
         cache = self._history_pagination_cache.get(cache_key)
 
-        # page=1 或缓存缺失时刷新，保证总能重新从最新数据开始。
-        if page == 1 or not isinstance(cache, dict):
+        # page=1、refresh=true 或缓存缺失时刷新，保证总能重新从最新数据开始。
+        if page == 1 or refresh or not isinstance(cache, dict):
             cache = {
                 "messages": [],
                 "seen": set(),
@@ -1715,7 +1727,14 @@ class ToolboxPlugin(Star):
 
                 cache["updated_at"] = int(datetime.now().timestamp())
 
-            all_messages = cache.get("messages", [])
+            # 读取缓存也刷新 TTL，避免用户连续翻页时缓存被误清理。
+            cache["updated_at"] = int(datetime.now().timestamp())
+
+            all_messages = sorted(
+                cache.get("messages", []),
+                key=self._history_sort_key_desc,
+                reverse=True,
+            )
             start_index = (page - 1) * page_size
             end_index = start_index + page_size
             page_messages = all_messages[start_index:end_index]
@@ -1730,6 +1749,8 @@ class ToolboxPlugin(Star):
 
             # 拼装返回摘要文字
             title = f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
+            if refresh:
+                title += "（已刷新缓存）"
             lines = [f"{title}（第 {page} 页，每页 {page_size} 条，本地缓存共 {len(all_messages)} 条）："]
             
             for msg in page_messages:
