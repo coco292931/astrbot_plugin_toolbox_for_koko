@@ -187,6 +187,10 @@ class ToolboxPlugin(Star):
         self.weather_summary_prompt = self.summary_prompt
         self.weather_summary_llm_provider_id = self.config.get("weather_summary_llm_provider_id", "")
 
+        # 历史消息本地分页缓存
+        self._history_cache_ttl_seconds = 1200 # 20 minutes
+        self._history_pagination_cache = {}
+
     def _safe_int(self, value, default: int, min_v: int, max_v: int) -> int:
         try:
             num = int(value)
@@ -482,8 +486,8 @@ class ToolboxPlugin(Star):
                     "properties": {
                         "mode": {"type": "string", "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断"},
                         "target_id": {"type": "string", "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全"},
-                        "message_seq": {"type": "integer", "description": "分页游标。允许传0（会原样透传）。未传该参数时默认传0以兼容跨会话查询；同群上下文且接口返回“消息不存在”时会自动尝试当前消息游标兜底。下一页建议使用返回中的 next_message_seq"},
-                        "count": {"type": "integer", "description": "返回数量，默认20，范围1-100"}
+                        "page": {"type": "integer", "description": "本地分页页码，默认1"},
+                        "count": {"type": "integer", "description": "每页返回数量（page_size），默认20，范围1-100"}
                     },
                     "required": []
                 },
@@ -1000,7 +1004,7 @@ class ToolboxPlugin(Star):
         if not matched:
             return {
                 "status": "success",
-                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词（query 或 keywords）或使用 call_koko_tools 查看全部可用工具。",
+                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。",
             }
 
         result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
@@ -1143,10 +1147,11 @@ class ToolboxPlugin(Star):
                 "[重要工具使用规范] 当你需要调用本插件能力时，必须遵循以下顺序：\n"
                 "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取）。\n"
                 "2. 若 search_koko_tools 没找到，再调用 call_koko_tools 查看完整可用工具列表和参数要点。\n"
+                "2.5. 若所需工具不在列表中，且更换关键词后任然无果，则尝试使用 search_wyc_tools 重复上述2步。"
                 "3. 确认工具名后，调用 run_koko_tool，并使用 tool_name + tool_args(JSON字符串)。\n"
                 "禁止跳过搜索直接猜测工具名。"
             )
-            guide_text = () # 故意的，别删
+            #guide_text = () # 故意的，别删
 
             if hasattr(request, "system_prompt") and request.system_prompt:
                 if guide_text not in request.system_prompt:
@@ -1487,6 +1492,79 @@ class ToolboxPlugin(Star):
             llm_compress=llm_compress,
         )
 
+    def _history_make_cache_key(self, event: AstrMessageEvent, mode: str, target_id: str, page_size: int) -> str:
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        return f"{origin}|{mode}|{target_id}|{page_size}"
+
+    def _history_prune_cache(self) -> None:
+        now_ts = int(datetime.now().timestamp())
+        expire_before = now_ts - self._history_cache_ttl_seconds
+        to_delete = []
+        for key, item in self._history_pagination_cache.items():
+            updated_at = int(item.get("updated_at", 0)) if isinstance(item, dict) else 0
+            if updated_at <= expire_before:
+                to_delete.append(key)
+        for key in to_delete:
+            self._history_pagination_cache.pop(key, None)
+
+    def _history_extract_messages(self, result: Any) -> list[dict]:
+        messages = []
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                for key in ("messages", "message", "list", "records"):
+                    value = data.get(key)
+                    if isinstance(value, list):
+                        messages = value
+                        break
+                if not messages and isinstance(data.get("data"), list):
+                    messages = data.get("data", [])
+            elif isinstance(data, list):
+                messages = data
+
+            if not messages:
+                for key in ("messages", "message", "list", "records"):
+                    value = result.get(key)
+                    if isinstance(value, list):
+                        messages = value
+                        break
+
+        if not isinstance(messages, list):
+            return []
+        return [m for m in messages if isinstance(m, dict)]
+
+    def _history_msg_unique_key(self, msg: dict) -> str:
+        msg_id = msg.get("message_id")
+        msg_seq = msg.get("message_seq")
+        time_text = msg.get("time", "")
+        sender_id = ""
+        sender = msg.get("sender")
+        if isinstance(sender, dict):
+            sender_id = str(sender.get("user_id", "") or "")
+        raw = str(msg.get("raw_message", "") or "")
+        return f"id={msg_id}|seq={msg_seq}|t={time_text}|u={sender_id}|raw={raw[:32]}"
+
+    def _history_pick_seq(self, msg: dict) -> int:
+        for key in ("message_seq", "message_id"):
+            value = msg.get(key)
+            try:
+                seq_num = int(str(value))
+                if seq_num >= 0:
+                    return seq_num
+            except Exception:
+                continue
+        return -1
+
+    def _history_format_time(self, msg: dict) -> str:
+        ts = msg.get("time")
+        try:
+            ts_num = int(str(ts))
+            if ts_num <= 0:
+                return "--:--"
+            return datetime.fromtimestamp(ts_num).strftime("%H:%M")
+        except Exception:
+            return "--:--"
+
     async def _handle_history(self, event: AstrMessageEvent, args: dict) -> str:
         if not self.enable_history:
             return "历史查询功能已被禁用。"
@@ -1500,17 +1578,17 @@ class ToolboxPlugin(Star):
 
         target_id = str(args.get("target_id", "") or "").strip()
 
-        has_message_seq = "message_seq" in args and args.get("message_seq") not in (None, "")
         try:
-            message_seq = int(args.get("message_seq", 0))
+            page = int(args.get("page", 1))
         except Exception:
-            message_seq = 0
+            page = 1
+        page = max(1, page)
 
         try:
             count = int(args.get("count", 20))
         except Exception:
             count = 20
-        count = max(1, min(count, 100))
+        page_size = max(1, min(count, 100))
 
         context_group_id = str(getattr(msg_obj, "group_id", "") or "").strip()
 
@@ -1540,6 +1618,8 @@ class ToolboxPlugin(Star):
                 return "缺少 target_id：group 模式请提供群号，或在群聊上下文中调用。"
             return "缺少 target_id：friend 模式请提供用户QQ号，或在私聊上下文中调用。"
 
+        self._history_prune_cache()
+
         # 获取底层 OneBot / go_cqhttp 的 client 实例
         client = None
         if hasattr(event, "bot") and getattr(event.bot, "api", None):
@@ -1552,145 +1632,110 @@ class ToolboxPlugin(Star):
             # 如果我们找不到支持 call_action 的属性，则通知大模型获取失败
             return "无法获取客户端 adapter，该端点可能不支持原生 call_action()。"
 
-        try:
+        cache_key = self._history_make_cache_key(event, mode, target_id, page_size)
+        cache = self._history_pagination_cache.get(cache_key)
+
+        # page=1 或缓存缺失时刷新，保证总能重新从最新数据开始。
+        if page == 1 or not isinstance(cache, dict):
+            cache = {
+                "messages": [],
+                "seen": set(),
+                "next_seq": 0,
+                "exhausted": False,
+                "updated_at": int(datetime.now().timestamp()),
+            }
+            self._history_pagination_cache[cache_key] = cache
+
+        async def _call_history(seq: int, fetch_count: int) -> Any:
             if mode == "group":
-                # 群聊历史记录
-                if not target_id:
-                    return "缺少 target_id：group 模式请提供群号。"
+                return await client.call_action(
+                    "get_group_msg_history",
+                    group_id=target_id,
+                    message_seq=seq,
+                    count=fetch_count,
+                )
+            return await client.call_action(
+                "get_friend_msg_history",
+                user_id=target_id,
+                message_seq=seq,
+                count=fetch_count,
+            )
 
-                # 保留 message_seq=0 的原始语义：若调用者显式传入，则原样透传。
-                # 未传 message_seq 时默认使用 0，兼容跨会话（跨群）查询。
-                group_seq = message_seq
-                if not has_message_seq:
-                    group_seq = 0
+        try:
+            needed_end = page * page_size
+            fetch_rounds = 0
 
-                try:
-                    result = await client.call_action(
-                        'get_group_msg_history',
-                        group_id=target_id,
-                        message_seq=group_seq,
-                        count=count,
-                    )
-                except Exception as first_err:
-                    # 若命中“消息不存在”，仅在同群上下文下再尝试本地消息游标兜底。
-                    err_text = str(first_err)
-                    same_group_context = bool(context_group_id) and str(context_group_id) == str(target_id)
-                    if "消息" in err_text and "不存在" in err_text and same_group_context:
-                        retry_seq = 0
-                        try:
-                            retry_seq = int(str(getattr(msg_obj, "message_id", "") or "0"))
-                        except Exception:
-                            retry_seq = 0
+            while len(cache.get("messages", [])) < needed_end and not cache.get("exhausted", False):
+                if fetch_rounds >= 8:
+                    break
+                fetch_rounds += 1
 
-                        if retry_seq <= 0 or retry_seq == group_seq:
-                            try:
-                                retry_seq = int(str(getattr(msg_obj, "timestamp", 0) or 0))
-                            except Exception:
-                                retry_seq = 0
+                seq_for_call = int(cache.get("next_seq", 0))
+                result = await _call_history(seq_for_call, 100)
+                logger.debug(f"历史消息接口返回: {result}")
 
-                        try:
-                            if retry_seq > 0 and retry_seq != group_seq:
-                                result = await client.call_action(
-                                    'get_group_msg_history',
-                                    group_id=target_id,
-                                    message_seq=retry_seq,
-                                    count=count,
-                                )
-                            else:
-                                raise
-                        except Exception:
-                            raise first_err
+                batch_messages = self._history_extract_messages(result)
+                if not batch_messages:
+                    cache["exhausted"] = True
+                    break
+
+                before_count = len(cache["messages"])
+                seen = cache.get("seen", set())
+                if not isinstance(seen, set):
+                    seen = set()
+
+                for msg in batch_messages:
+                    unique_key = self._history_msg_unique_key(msg)
+                    if unique_key in seen:
+                        continue
+                    seen.add(unique_key)
+                    cache["messages"].append(msg)
+
+                cache["seen"] = seen
+                after_count = len(cache["messages"])
+                if after_count == before_count:
+                    # 常见于后端不支持 seq 翻页并重复返回同一批数据。
+                    cache["exhausted"] = True
+                    break
+
+                seq_values = []
+                for msg in batch_messages:
+                    seq_num = self._history_pick_seq(msg)
+                    if seq_num >= 0:
+                        seq_values.append(seq_num)
+
+                if seq_values:
+                    next_seq = min(seq_values) - 1
+                    if next_seq >= 0 and next_seq != seq_for_call:
+                        cache["next_seq"] = next_seq
                     else:
-                        raise
-            else:
-                # 好友历史记录
-                if not target_id:
-                    return "缺少 target_id：friend 模式请提供用户QQ号。"
+                        cache["exhausted"] = True
+                else:
+                    cache["exhausted"] = True
 
-                result = await client.call_action('get_friend_msg_history', user_id=target_id, message_seq=message_seq, count=count)
+                cache["updated_at"] = int(datetime.now().timestamp())
 
-            logger.debug(f"历史消息接口返回: {result}")
-            print(f"历史消息接口返回: {result}")
+            all_messages = cache.get("messages", [])
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            page_messages = all_messages[start_index:end_index]
 
-            # 兼容不同 OneBot 实现返回结构：
-            # - {data: {messages: [...]}}
-            # - {data: [...]}
-            # - {messages: [...]} / {message: [...]} 等
-            messages = []
-            if isinstance(result, dict):
-                data = result.get('data')
-
-                if isinstance(data, dict):
-                    for key in ('messages', 'message', 'list', 'records'):
-                        candidate = data.get(key)
-                        if isinstance(candidate, list):
-                            messages = candidate
-                            break
-                    if not messages and isinstance(data.get('data'), list):
-                        messages = data.get('data', [])
-                elif isinstance(data, list):
-                    messages = data
-
-                if not messages:
-                    for key in ('messages', 'message', 'list', 'records'):
-                        candidate = result.get(key)
-                        if isinstance(candidate, list):
-                            messages = candidate
-                            break
-
-            if isinstance(messages, list):
-                messages = [m for m in messages if isinstance(m, dict)]
-            else:
-                messages = []
-
-            if not messages:
-                result_keys = []
-                data_type = type(None).__name__
-                data_keys = []
-                result_preview = ""
-
-                if isinstance(result, dict):
-                    result_keys = list(result.keys())
-                    data_obj = result.get('data')
-                    data_type = type(data_obj).__name__
-                    data_keys = list(data_obj.keys()) if isinstance(data_obj, dict) else []
-
-                try:
-                    result_preview = json.dumps(result, ensure_ascii=False)
-                except Exception:
-                    result_preview = str(result)
-                if len(result_preview) > 800:
-                    result_preview = result_preview[:800] + "..."
-
-                logger.debug(
-                    f"历史消息为空，返回结构摘要: result_keys={result_keys}, "
-                    f"data_type={data_type}, data_keys={data_keys}"
-                )
-
-                return (
-                    "暂无历史消息记录。\n"
-                    "[诊断信息]\n"
-                    f"mode={mode}, target_id={target_id}, message_seq={message_seq}, count={count}\n"
-                    f"result_keys={result_keys}\n"
-                    f"data_type={data_type}, data_keys={data_keys}\n"
-                    f"result_preview={result_preview}"
-                )
+            if not page_messages:
+                if all_messages:
+                    return (
+                        f"暂无更多历史消息（当前共缓存 {len(all_messages)} 条）。")
+                        #"可尝试将 page 设为 1 重新开始。"
+                    #)
+                return "暂无历史消息记录"
 
             # 拼装返回摘要文字
             title = f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
-            lines = [f"{title}（拉取到 {len(messages)} 条）："]
-            seq_candidates = []
+            lines = [f"{title}（第 {page} 页，每页 {page_size} 条，本地缓存共 {len(all_messages)} 条）："]
             
-            for msg in messages:
+            for msg in page_messages:
                 sender_info = msg.get('sender', {})
                 sender = sender_info.get('nickname', sender_info.get('user_id', '未知'))
-                seq_value = msg.get('message_seq', msg.get('message_id', ''))
-                try:
-                    seq_num = int(str(seq_value))
-                    if seq_num > 0:
-                        seq_candidates.append(seq_num)
-                except Exception:
-                    pass
+                time_text = self._history_format_time(msg)
 
                 # 优先获取原始纯文本消息
                 raw_msg = msg.get('raw_message', '')
@@ -1701,14 +1746,18 @@ class ToolboxPlugin(Star):
                             raw_msg += segment.get('data', {}).get('text', '')
                 # 简单格式化与截断过长单条消息
                 content = raw_msg[:200].replace('\n', '  ')
-                seq_text = str(seq_value) if seq_value not in (None, "") else "NA"
-                lines.append(f"• [{seq_text}] {sender}: {content}")
+                lines.append(f"• [{time_text}] {sender}: {content}")
 
-            if seq_candidates:
-                next_message_seq = min(seq_candidates) - 1
-                if next_message_seq > 0:
-                    lines.append("")
-                    lines.append(f"分页提示：下一页可传 message_seq={next_message_seq}（基于本页最早序号向前翻页）。")
+            has_more_local = len(all_messages) > end_index
+            may_have_more_remote = not cache.get("exhausted", False)
+            lines.append("")
+            if has_more_local or may_have_more_remote:
+                lines.append(
+                    f"分页提示：下一页可传 page={page + 1}, count={page_size}"
+                    f"（mode={mode}, target_id={target_id}）。"
+                )
+            else:
+                lines.append("分页提示：已到达末页。")
                 
             return "\n".join(lines)
             
