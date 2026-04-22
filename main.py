@@ -502,6 +502,68 @@ class ToolboxPlugin(Star):
         """返回当前启用状态下可用的工具。"""
         return dict(self._tool_registry)
 
+    def _get_wyc_plugin_instance(self):
+        candidate_names = [
+            "astrbot_plugin_qzone_tools",
+            "更多koko工具",
+            "Qzone核心工具",
+        ]
+        for plugin_name in candidate_names:
+            try:
+                meta = self.context.get_registered_star(plugin_name)
+            except Exception:
+                meta = None
+            if meta and getattr(meta, "star_cls", None):
+                return meta.star_cls
+
+        try:
+            all_stars = self.context.get_all_stars()
+        except Exception:
+            all_stars = []
+
+        for meta in all_stars:
+            module_path = str(getattr(meta, "module_path", "") or "")
+            star_name = str(getattr(meta, "name", "") or "")
+            if "qzone_tools" in module_path or "qzone_tools" in star_name:
+                star_cls = getattr(meta, "star_cls", None)
+                if star_cls:
+                    return star_cls
+        return None
+
+    async def _forward_search_to_wyc(self, event: AstrMessageEvent, query: str) -> dict | None:
+        wyc_plugin = self._get_wyc_plugin_instance()
+        if not wyc_plugin:
+            return None
+        search_fn = getattr(wyc_plugin, "search_wyc_tools", None)
+        if not callable(search_fn):
+            return None
+        try:
+            wyc_result = await search_fn(event, query=query)
+            if isinstance(wyc_result, dict):
+                return wyc_result
+        except Exception as e:
+            logger.error(f"[search_koko_tools] 转发 search_wyc_tools 失败: {e}")
+        return None
+
+    async def _forward_run_to_wyc(self, event: AstrMessageEvent, tool_name: str, args_dict: dict) -> dict | None:
+        wyc_plugin = self._get_wyc_plugin_instance()
+        if not wyc_plugin:
+            return None
+        run_fn = getattr(wyc_plugin, "run_wyc_tool", None)
+        if not callable(run_fn):
+            return None
+        try:
+            wyc_result = await run_fn(
+                event,
+                tool_name=tool_name,
+                tool_args=json.dumps(args_dict or {}, ensure_ascii=False),
+            )
+            if isinstance(wyc_result, dict):
+                return wyc_result
+        except Exception as e:
+            logger.error(f"[run_koko_tool] 转发 run_wyc_tool 失败: {e}")
+        return None
+
     async def _run_tool_weather_location(self, event: AstrMessageEvent, args: dict) -> str:
         return await self._handle_location(args)
 
@@ -1003,6 +1065,19 @@ class ToolboxPlugin(Star):
                 )
 
         if not matched:
+            wyc_result = await self._forward_search_to_wyc(event, query.strip())
+            if isinstance(wyc_result, dict):
+                wyc_message = str(wyc_result.get("message", "") or "").strip()
+                if wyc_message:
+                    return {
+                        "status": "success",
+                        "message": (
+                            f"koko 工具未命中，已自动转发至 wyc 工具检索。\n"
+                            f"{wyc_message}"
+                        ),
+                        "forwarded_to": "search_wyc_tools",
+                        "wyc_result": wyc_result,
+                    }
             return {
                 "status": "success",
                 "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。",
@@ -1097,6 +1172,16 @@ class ToolboxPlugin(Star):
 
         available_tools = self._get_available_tools()
         if normalized_name not in available_tools:
+            wyc_result = await self._forward_run_to_wyc(event, normalized_name, args_dict)
+            if isinstance(wyc_result, dict):
+                wyc_status = str(wyc_result.get("status", "success") or "success")
+                if wyc_status.lower() != "error":
+                    return {
+                        "status": "success",
+                        "message": "koko 工具未命中，已自动转发至 wyc 工具执行。",
+                        "forwarded_to": "run_wyc_tool",
+                        "wyc_result": wyc_result,
+                    }
             return {
                 "status": "error",
                 "message": f"无效的工具名称或工具未启用: {name_raw}。请先使用 search_koko_tools 或 call_koko_tools 获取可用工具。",
