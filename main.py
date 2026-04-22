@@ -115,7 +115,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.2.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.2.9+", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
