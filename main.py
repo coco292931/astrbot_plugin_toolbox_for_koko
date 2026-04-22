@@ -1663,13 +1663,13 @@ class ToolboxPlugin(Star):
                 return await client.call_action(
                     "get_group_msg_history",
                     group_id=target_id,
-                    message_seq=seq,
+                    #message_seq=seq,
                     count=fetch_count,
                 )
             return await client.call_action(
                 "get_friend_msg_history",
                 user_id=target_id,
-                message_seq=seq,
+                #message_seq=seq,
                 count=fetch_count,
             )
 
@@ -1683,7 +1683,7 @@ class ToolboxPlugin(Star):
                 fetch_rounds += 1
 
                 seq_for_call = int(cache.get("next_seq", 0))
-                result = await _call_history(seq_for_call, 100)
+                result = await _call_history(seq_for_call, 100*fetch_rounds)
                 logger.debug(f"历史消息接口返回: {result}")
 
                 batch_messages = self._history_extract_messages(result)
