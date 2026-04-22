@@ -153,6 +153,37 @@
         "type": "bool",
         "default": true
     },
+    "memory": {
+        "description": "记忆与管理员命令配置",
+        "type": "object",
+        "hint": "配置记忆容量与管理员命令开关。",
+        "items": {
+            "max_memories_per_user": {
+                "description": "每个用户最多保留记忆条数",
+                "hint": "超过该数量后会自动清理最旧记录。建议 20-500。",
+                "type": "int",
+                "default": 100
+            },
+            "enable_admin_tool_memory_command": {
+                "description": "启用管理员命令 /tool_memory",
+                "hint": "开启后仅管理员可用 /tool_memory 进行记忆管理。",
+                "type": "bool",
+                "default": true
+            },
+            "memory_inject_enabled": {
+                "description": "启用记忆自动注入上下文",
+                "hint": "开启后会在 LLM 请求前自动注入当前用户近期记忆。",
+                "type": "bool",
+                "default": true
+            },
+            "memory_inject_count": {
+                "description": "每次注入的记忆条数",
+                "hint": "建议 3-8。数值越大，占用上下文越多。",
+                "type": "int",
+                "default": 5
+            }
+        }
+    },
     "interaction": {
         "description": "交互触发配置",
         "type": "object",

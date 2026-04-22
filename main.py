@@ -5,9 +5,10 @@ import json
 import random
 import socket
 import ipaddress
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional, List, Dict
 
 from bs4 import BeautifulSoup
 from readability import Document
@@ -16,7 +17,140 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.all import llm_tool
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.core.message.message_event_result import MessageChain
 import traceback
+
+
+class MemoryManager:
+    def __init__(self, data_dir: Path, max_memories_per_user: int = 100):
+        self.data_dir = data_dir
+        self.max_memories_per_user = max_memories_per_user
+        self._lock = asyncio.Lock()
+        self._file_path = self.data_dir / "memories.json"
+        self._ensure_file()
+
+    def _ensure_file(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        if not self._file_path.exists():
+            self._save_data({"memories": []})
+
+    def _load_data(self) -> dict:
+        try:
+            return json.loads(self._file_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"memories": []}
+
+    def _save_data(self, data: dict) -> None:
+        self._file_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _get_timestamp(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _cleanup_if_needed(self, user_id: str) -> None:
+        if self.max_memories_per_user <= 0:
+            return
+        data = self._load_data()
+        memories = data.get("memories", [])
+        user_memories = [m for m in memories if m.get("user_id") == str(user_id)]
+        if len(user_memories) <= self.max_memories_per_user:
+            return
+
+        user_memories.sort(key=lambda x: x.get("updated_at", ""))
+        remove_count = len(user_memories) - self.max_memories_per_user
+        remove_ids = {m["id"] for m in user_memories[:remove_count]}
+        memories = [m for m in memories if m.get("id") not in remove_ids]
+        self._save_data({"memories": memories})
+
+    async def add_memory(self, user_id: str, content: str, tags: list = None, importance: int = 5) -> str:
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            memory_id = str(uuid.uuid4())[:8]
+            now = self._get_timestamp()
+            memories.append(
+                {
+                    "id": memory_id,
+                    "user_id": str(user_id),
+                    "content": content,
+                    "tags": tags or [],
+                    "importance": max(1, min(10, importance)),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            self._save_data({"memories": memories})
+            await self._cleanup_if_needed(user_id)
+            return memory_id
+
+    async def update_memory(
+        self,
+        memory_id: str,
+        content: str = None,
+        tags: list = None,
+        importance: int = None,
+    ) -> bool:
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            for memory in memories:
+                if memory.get("id") != memory_id:
+                    continue
+                if content is not None:
+                    memory["content"] = content
+                if tags is not None:
+                    memory["tags"] = tags
+                if importance is not None:
+                    memory["importance"] = max(1, min(10, importance))
+                memory["updated_at"] = self._get_timestamp()
+                self._save_data({"memories": memories})
+                return True
+            return False
+
+    async def delete_memory(self, memory_id: str) -> bool:
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            old_len = len(memories)
+            memories = [m for m in memories if m.get("id") != memory_id]
+            if len(memories) == old_len:
+                return False
+            self._save_data({"memories": memories})
+            return True
+
+    async def get_memories(
+        self,
+        user_id: str = None,
+        keyword: str = None,
+        limit: int = 10,
+        sort_by: str = "updated_at",
+    ) -> List[dict]:
+        data = self._load_data()
+        memories = data.get("memories", [])
+        if user_id:
+            memories = [m for m in memories if m.get("user_id") == str(user_id)]
+        if keyword:
+            key = keyword.lower()
+            memories = [
+                m
+                for m in memories
+                if key in m.get("content", "").lower()
+                or any(key in str(tag).lower() for tag in m.get("tags", []))
+            ]
+        if sort_by == "importance":
+            memories.sort(key=lambda x: x.get("importance", 0), reverse=True)
+        elif sort_by in {"updated_at", "created_at"}:
+            memories.sort(key=lambda x: x.get(sort_by, ""), reverse=True)
+        return memories[:limit]
+
+    async def get_memory_by_id(self, memory_id: str) -> Optional[dict]:
+        memories = await self.get_memories(limit=10000)
+        for memory in memories:
+            if memory.get("id") == memory_id:
+                return memory
+        return None
 
 
 def _load_schema_defaults() -> dict:
@@ -110,12 +244,23 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)
 
+    memory_cfg = raw.get("memory", {})
+    if isinstance(memory_cfg, dict):
+        for key in (
+            "max_memories_per_user",
+            "enable_admin_tool_memory_command",
+            "memory_inject_enabled",
+            "memory_inject_count",
+        ):
+            if key in memory_cfg:
+                incoming[key] = memory_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.2.10", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.3.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -190,6 +335,33 @@ class ToolboxPlugin(Star):
         # 历史消息本地分页缓存
         self._history_cache_ttl_seconds = 1200 # 20 minutes
         self._history_pagination_cache = {}
+
+        # 记忆存储
+        self.data_dir = Path(__file__).with_name("data")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        max_memories_per_user = self._safe_int(self.config.get("max_memories_per_user", 100), 100, 1, 10000)
+        self.memory_manager = MemoryManager(self.data_dir, max_memories_per_user)
+        self.enable_admin_tool_memory_command = self._safe_bool(
+            self.config.get("enable_admin_tool_memory_command", True),
+            True,
+        )
+        self.memory_inject_enabled = self._safe_bool(
+            self.config.get("memory_inject_enabled", True),
+            True,
+        )
+        self.memory_inject_count = self._safe_int(
+            self.config.get("memory_inject_count", 5),
+            5,
+            1,
+            20,
+        )
+
+        # 联系人缓存（用于自动识别发消息目标类型）
+        self._groups_cache: List[dict] = []
+        self._friends_cache: List[dict] = []
+        self._cache_time = 0.0
+        self._cache_expire = 300
+        self._cache_lock = asyncio.Lock()
 
     def _safe_int(self, value, default: int, min_v: int, max_v: int) -> int:
         try:
@@ -433,7 +605,7 @@ class ToolboxPlugin(Star):
                     },
                     "required": ["location"]
                 },
-                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气"],
+                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气", "天气"],
                 "handler": self._run_tool_weather_history,
             }
 
@@ -464,7 +636,7 @@ class ToolboxPlugin(Star):
                     "type": "object",
                     "properties": {
                         "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"},
-                        "skip_filter": {"type": "boolean", "description": "开关：false(默认)=增强抓取逻辑；true=原版 fetch_url 逻辑。"},
+                        "skip_filter": {"type": "boolean", "description": "开关：false(默认)=增强抓取逻辑；true=原版逻辑。"},
                         "llm_compress": {
                             "type": "string",
                             "enum": ["inherit", "summary", "truncate"],
@@ -473,7 +645,7 @@ class ToolboxPlugin(Star):
                     },
                     "required": ["url"]
                 },
-                "keywords": ["抓取网页", "网页正文", "url", "fetch", "extract"],
+                "keywords": ["搜索", "抓取网页", "网页正文", "url", "fetch", "extract"],
                 "handler": self._run_tool_fetch_url,
             }
 
@@ -492,9 +664,104 @@ class ToolboxPlugin(Star):
                     },
                     "required": []
                 },
-                "keywords": ["历史消息", "聊天记录", "群历史", "私聊历史", "history", "message log"],
+                "keywords": ["聊天", "消息", "历史记录", "历史消息", "聊天记录", "群历史", "私聊历史", "history", "message log"],
                 "handler": self._run_tool_history,
             }
+
+        registry["add_memory"] = {
+            "name": "add_memory",
+            "description": "添加重要记忆到存储中，便于后续检索。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "记忆内容，必填"},
+                    "tags": {"type": "string", "description": "标签，多个标签用英文逗号分隔，可选"},
+                    "importance": {"type": "integer", "description": "重要程度，1-10，默认5"},
+                    "user_id": {"type": "string", "description": "可选，指定记忆所属用户，默认当前会话发送者"},
+                },
+                "required": ["content"],
+            },
+            "keywords": ["记忆", "保存记忆", "添加记忆", "备忘", "note", "memory"],
+            "handler": self._run_tool_add_memory,
+        }
+
+        registry["search_memories"] = {
+            "name": "search_memories",
+            "description": "搜索已保存记忆，支持关键词和用户范围。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，可选"},
+                    "user_specific": {"type": "boolean", "description": "是否仅搜索当前用户，默认true"},
+                    "limit": {"type": "integer", "description": "返回数量，默认10，最大20"},
+                    "user_id": {"type": "string", "description": "可选，强制指定查询用户"},
+                },
+                "required": [],
+            },
+            "keywords": ["记忆", "搜索记忆", "查找记忆", "记忆列表", "recall", "memory"],
+            "handler": self._run_tool_search_memories,
+        }
+
+        registry["update_memory"] = {
+            "name": "update_memory",
+            "description": "更新记忆内容、标签或重要度。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "记忆ID，必填"},
+                    "content": {"type": "string", "description": "新内容，可选"},
+                    "tags": {"type": "string", "description": "新标签，逗号分隔，可选"},
+                    "importance": {"type": "integer", "description": "新重要度，1-10，可选"},
+                },
+                "required": ["memory_id"],
+            },
+            "keywords": ["记忆", "更新记忆", "修改记忆", "edit memory"],
+            "handler": self._run_tool_update_memory,
+        }
+
+        registry["delete_memory"] = {
+            "name": "delete_memory",
+            "description": "删除指定记忆。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "记忆ID，必填"},
+                },
+                "required": ["memory_id"],
+            },
+            "keywords": ["记忆", "删除记忆", "清除记忆", "forget", "remove note"],
+            "handler": self._run_tool_delete_memory,
+        }
+
+        registry["get_memory_detail"] = {
+            "name": "get_memory_detail",
+            "description": "获取单条记忆详情。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "记忆ID，必填"},
+                },
+                "required": ["memory_id"],
+            },
+            "keywords": ["记忆", "记忆详情", "查看记忆", "memory detail"],
+            "handler": self._run_tool_get_memory_detail,
+        }
+
+        registry["send_message"] = {
+            "name": "send_message",
+            "description": "立即向指定QQ好友或群聊发送文本消息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_id": {"type": "string", "description": "目标QQ号或群号，必填"},
+                    "message": {"type": "string", "description": "消息内容，必填"},
+                    "chat_type": {"type": "string", "description": "聊天类型：group/private/auto，默认auto"},
+                },
+                "required": ["target_id", "message"],
+            },
+            "keywords": ["发消息", "发送消息", "私聊", "群发", "message", "消息"],
+            "handler": self._run_tool_send_message,
+        }
 
         return registry
 
@@ -582,6 +849,24 @@ class ToolboxPlugin(Star):
     async def _run_tool_history(self, event: AstrMessageEvent, args: dict) -> str:
         return await self._handle_history(event, args)
 
+    async def _run_tool_add_memory(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_add_memory(event, args)
+
+    async def _run_tool_search_memories(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_search_memories(event, args)
+
+    async def _run_tool_update_memory(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_update_memory(args)
+
+    async def _run_tool_delete_memory(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_delete_memory(args)
+
+    async def _run_tool_get_memory_detail(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_get_memory_detail(args)
+
+    async def _run_tool_send_message(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_send_message(event, args)
+
     def _build_qweather_auth(self):
         """优先使用 Bearer JWT（文档推荐），否则回退到 key 参数模式。"""
         headers = {}
@@ -599,6 +884,199 @@ class ToolboxPlugin(Star):
         if use_query_key:
             return self.qweather_weather_host
         return "geoapi.qweather.com"
+
+    async def _get_client(self, event: AstrMessageEvent) -> Any:
+        if hasattr(event, "bot") and getattr(event.bot, "api", None):
+            return getattr(event.bot, "api", None)
+        if hasattr(event, "bot") and hasattr(event.bot, "call_action"):
+            return event.bot
+        return None
+
+    def _validate_target_id(self, target_id: str) -> tuple[bool, str]:
+        target = str(target_id or "").strip()
+        if not target:
+            return False, "目标ID不能为空"
+        if not target.isdigit():
+            return False, "目标ID必须是纯数字"
+        return True, target
+
+    async def _update_contacts_cache(self, client: Any) -> None:
+        async with self._cache_lock:
+            now = datetime.now().timestamp()
+            if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
+                return
+
+            try:
+                groups_result = await client.call_action("get_group_list")
+                if isinstance(groups_result, list):
+                    self._groups_cache = groups_result
+                elif isinstance(groups_result, dict):
+                    self._groups_cache = groups_result.get("data", [])
+                else:
+                    self._groups_cache = []
+            except Exception:
+                self._groups_cache = []
+
+            try:
+                friends_result = await client.call_action("get_friend_list")
+                if isinstance(friends_result, list):
+                    self._friends_cache = friends_result
+                elif isinstance(friends_result, dict):
+                    self._friends_cache = friends_result.get("data", [])
+                else:
+                    self._friends_cache = []
+            except Exception:
+                self._friends_cache = []
+
+            self._cache_time = now
+
+    async def _handle_add_memory(self, event: AstrMessageEvent, args: dict) -> str:
+        content = str(args.get("content", "") or "").strip()
+        if not content:
+            return "❌ 参数缺失：请提供记忆内容。"
+
+        user_id = str(args.get("user_id", "") or "").strip() or str(event.get_sender_id())
+        tags = str(args.get("tags", "") or "")
+        tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+        try:
+            importance = int(args.get("importance", 5))
+        except Exception:
+            importance = 5
+        importance = max(1, min(10, importance))
+
+        memory_id = await self.memory_manager.add_memory(user_id, content, tags_list, importance)
+        preview = f"{content[:50]}{'...' if len(content) > 50 else ''}"
+        return f"✅ 记忆已保存\nID: {memory_id}\n内容: {preview}"
+
+    async def _handle_search_memories(self, event: AstrMessageEvent, args: dict) -> str:
+        keyword = str(args.get("keyword", "") or "").strip()
+        user_specific = self._safe_bool(args.get("user_specific", True), True)
+
+        raw_limit = args.get("limit", 10)
+        try:
+            limit = int(raw_limit)
+        except Exception:
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        forced_user_id = str(args.get("user_id", "") or "").strip()
+        user_id = forced_user_id or (str(event.get_sender_id()) if user_specific else None)
+        memories = await self.memory_manager.get_memories(
+            user_id=user_id,
+            keyword=keyword if keyword else None,
+            limit=limit,
+        )
+        if not memories:
+            if keyword:
+                return f"📭 未找到包含「{keyword}」的记忆"
+            return "📭 暂无记忆"
+
+        lines = [f"📚 找到 {len(memories)} 条记忆："]
+        for index, memory in enumerate(memories, 1):
+            tags = memory.get("tags", []) or []
+            tags_text = f"[{', '.join(tags)}]" if tags else ""
+            content = str(memory.get("content", "") or "")
+            preview = content[:40] + ("..." if len(content) > 40 else "")
+            lines.append(
+                f"{index}. [{memory.get('id')}] {preview} "
+                f"(重要度:{memory.get('importance', 5)}) {tags_text} - {str(memory.get('updated_at', ''))[:10]}"
+            )
+        return "\n".join(lines)
+
+    async def _handle_update_memory(self, args: dict) -> str:
+        memory_id = str(args.get("memory_id", "") or "").strip()
+        if not memory_id:
+            return "❌ 参数缺失：请提供要更新的记忆ID。"
+
+        existing = await self.memory_manager.get_memory_by_id(memory_id)
+        if not existing:
+            return f"❌ 未找到记忆ID: {memory_id}"
+
+        content = args.get("content")
+        if content is not None:
+            content = str(content)
+
+        tags = args.get("tags")
+        tags_list = None
+        if tags is not None:
+            tags_list = [t.strip() for t in str(tags).split(",") if t.strip()]
+
+        importance = args.get("importance")
+        if importance is not None:
+            try:
+                importance = int(importance)
+            except Exception:
+                return "❌ 参数错误：importance 必须是数字。"
+
+        success = await self.memory_manager.update_memory(memory_id, content, tags_list, importance)
+        return f"✅ 记忆已更新\nID: {memory_id}" if success else "❌ 更新失败"
+
+    async def _handle_delete_memory(self, args: dict) -> str:
+        memory_id = str(args.get("memory_id", "") or "").strip()
+        if not memory_id:
+            return "❌ 参数缺失：请提供要删除的记忆ID。"
+
+        existing = await self.memory_manager.get_memory_by_id(memory_id)
+        if not existing:
+            return f"❌ 未找到记忆ID: {memory_id}"
+
+        success = await self.memory_manager.delete_memory(memory_id)
+        return f"🗑️ 记忆已删除\nID: {memory_id}" if success else "❌ 删除失败"
+
+    async def _handle_get_memory_detail(self, args: dict) -> str:
+        memory_id = str(args.get("memory_id", "") or "").strip()
+        if not memory_id:
+            return "❌ 参数缺失：请提供记忆ID。"
+
+        memory = await self.memory_manager.get_memory_by_id(memory_id)
+        if not memory:
+            return f"❌ 未找到记忆ID: {memory_id}"
+
+        lines = [
+            "📋 记忆详情",
+            f"ID: {memory.get('id')}",
+            f"用户: {memory.get('user_id')}",
+            f"内容: {memory.get('content')}",
+            f"标签: {', '.join(memory.get('tags', [])) or '无'}",
+            f"重要度: {memory.get('importance', 5)}/10",
+            f"创建: {memory.get('created_at')}",
+            f"更新: {memory.get('updated_at')}",
+        ]
+        return "\n".join(lines)
+
+    async def _handle_send_message(self, event: AstrMessageEvent, args: dict) -> str:
+        target_id = str(args.get("target_id", "") or "").strip()
+        message = str(args.get("message", "") or "").strip()
+        if not target_id or not message:
+            return "❌ 参数缺失：请提供目标ID和消息内容。"
+
+        chat_type = str(args.get("chat_type", "auto") or "auto").strip().lower()
+        if chat_type not in {"auto", "group", "private"}:
+            return "❌ 参数错误：chat_type 仅支持 group/private/auto。"
+
+        is_valid, normalized_target = self._validate_target_id(target_id)
+        if not is_valid:
+            return f"参数错误: {normalized_target}"
+
+        client = await self._get_client(event)
+        if not client or not hasattr(client, "call_action"):
+            return "错误：无法获取客户端"
+
+        final_chat_type = chat_type
+        if final_chat_type == "auto":
+            await self._update_contacts_cache(client)
+            is_group = any(str(g.get("group_id")) == normalized_target for g in self._groups_cache)
+            final_chat_type = "group" if is_group else "private"
+
+        try:
+            if final_chat_type == "group":
+                await client.call_action("send_group_msg", group_id=int(normalized_target), message=message)
+            else:
+                await client.call_action("send_private_msg", user_id=int(normalized_target), message=message)
+            return f"✅ 已发送消息到 {normalized_target}"
+        except Exception as e:
+            return f"发送失败: {str(e)}"
 
     async def _tidy_text(self, text: str) -> str:
         """清理网页文本，压缩空白。"""
@@ -1230,10 +1708,10 @@ class ToolboxPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
         try:
             guide_text = (
-                "[重要工具使用规范] 当你需要调用本插件能力时，必须遵循以下顺序：\n"
-                "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取）。\n"
+                "[重要工具使用规范] 当你需要调用本能力时，必须遵循以下顺序：\n"
+                "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取、记忆、发消息）。\n"
                 "2. 若 search_koko_tools 没找到，再调用 call_koko_tools 查看完整可用工具列表和参数要点。\n"
-                "2.5. 若所需工具不在列表中，且更换关键词后任然无果，则尝试使用 search_wyc_tools 重复上述2步。"
+                #"2.5. 若所需工具不在列表中，且更换关键词后仍然无果，则尝试使用 search_wyc_tools 重复上述2步。"
                 "3. 确认工具名后，调用 run_koko_tool，并使用 tool_name + tool_args(JSON字符串)。\n"
                 "禁止跳过搜索直接猜测工具名。"
             )
@@ -1244,8 +1722,128 @@ class ToolboxPlugin(Star):
                     request.system_prompt += f"\n{guide_text}\n"
             elif hasattr(request, "system_prompt"):
                 request.system_prompt = guide_text + "\n"
+
+            if self.memory_inject_enabled and hasattr(request, "system_prompt"):
+                try:
+                    user_id = str(event.get_sender_id() or "").strip()
+                except Exception:
+                    user_id = ""
+
+                if user_id:
+                    memories = await self.memory_manager.get_memories(
+                        user_id=user_id,
+                        limit=self.memory_inject_count,
+                        sort_by="updated_at",
+                    )
+                    if memories:
+                        memory_lines = []
+                        for idx, memory in enumerate(memories, 1):
+                            content = str(memory.get("content", "") or "").strip()
+                            if not content:
+                                continue
+                            importance = memory.get("importance", 5)
+                            tags = memory.get("tags", []) or []
+                            tags_text = f" [{', '.join(tags)}]" if tags else ""
+                            memory_lines.append(
+                                f"{idx}. {content}{tags_text} (重要度:{importance})"
+                            )
+
+                        if memory_lines:
+                            memory_block = (
+                                f"[用户历史记忆] 该用户({user_id})的重要信息："
+                                + "\n".join(memory_lines)
+                            )
+                            if request.system_prompt:
+                                request.system_prompt += f"\n{memory_block}\n"
+                            else:
+                                request.system_prompt = memory_block + "\n"
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tool_memory")
+    async def admin_tool_memory(self, event: AstrMessageEvent):
+        if not self.enable_admin_tool_memory_command:
+            await event.send(MessageChain().message("管理员命令 /tool_memory 已被配置禁用"))
+            return
+
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            await event.send(MessageChain().message("用法：/tool_memory list/add/delete/update/get [参数]"))
+            return
+
+        sub = args[1].lower()
+        if sub == "list":
+            user_id = args[2] if len(args) > 2 else None
+            memories = await self.memory_manager.get_memories(user_id=user_id, limit=50)
+            if not memories:
+                await event.send(MessageChain().message("暂无记忆"))
+                return
+
+            lines = [f"记忆列表（共{len(memories)}条）"]
+            for memory in memories:
+                content = str(memory.get("content", "") or "")
+                lines.append(
+                    f"{memory.get('id')} | {memory.get('user_id')} | {content[:30]} | 重要:{memory.get('importance', 5)}"
+                )
+            await event.send(MessageChain().message("\n".join(lines)))
+            return
+
+        if sub == "add":
+            if len(args) < 3:
+                await event.send(MessageChain().message("用法：/tool_memory add <内容> [标签] [重要度]"))
+                return
+            content = args[2]
+            tags = args[3] if len(args) > 3 else ""
+            importance = int(args[4]) if len(args) > 4 and args[4].isdigit() else 5
+            tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+            memory_id = await self.memory_manager.add_memory("admin", content, tags_list, importance)
+            await event.send(MessageChain().message(f"记忆已添加，ID: {memory_id}"))
+            return
+
+        if sub == "delete":
+            if len(args) < 3:
+                await event.send(MessageChain().message("用法：/tool_memory delete <记忆ID>"))
+                return
+            memory_id = args[2]
+            success = await self.memory_manager.delete_memory(memory_id)
+            await event.send(MessageChain().message("记忆已删除" if success else "删除失败"))
+            return
+
+        if sub == "update":
+            if len(args) < 3:
+                await event.send(MessageChain().message("用法：/tool_memory update <记忆ID> [新内容] [新标签] [新重要度]"))
+                return
+            memory_id = args[2]
+            content = args[3] if len(args) > 3 else None
+            tags = args[4] if len(args) > 4 else None
+            importance = int(args[5]) if len(args) > 5 and args[5].isdigit() else None
+            tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags is not None else None
+            success = await self.memory_manager.update_memory(memory_id, content, tags_list, importance)
+            await event.send(MessageChain().message("记忆已更新" if success else "更新失败"))
+            return
+
+        if sub == "get":
+            if len(args) < 3:
+                await event.send(MessageChain().message("用法：/tool_memory get <记忆ID>"))
+                return
+            memory = await self.memory_manager.get_memory_by_id(args[2])
+            if not memory:
+                await event.send(MessageChain().message("未找到记忆"))
+                return
+            lines = [
+                f"ID: {memory.get('id')}",
+                f"用户: {memory.get('user_id')}",
+                f"内容: {memory.get('content')}",
+                f"标签: {', '.join(memory.get('tags', []))}",
+                f"重要度: {memory.get('importance', 5)}",
+                f"创建: {memory.get('created_at')}",
+                f"更新: {memory.get('updated_at')}",
+            ]
+            await event.send(MessageChain().message("\n".join(lines)))
+            return
+
+        await event.send(MessageChain().message("未知子命令，可用: list, add, delete, update, get"))
 
     async def _handle_weather(self, args: dict) -> str:
         if not self.enable_weather:
