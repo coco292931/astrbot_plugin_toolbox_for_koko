@@ -1510,7 +1510,9 @@ class ToolboxPlugin(Star):
 
     def _history_extract_messages(self, result: Any) -> list[dict]:
         messages = []
-        if isinstance(result, dict):
+        if isinstance(result, list):
+            messages = result
+        elif isinstance(result, dict):
             data = result.get("data")
             if isinstance(data, dict):
                 for key in ("messages", "message", "list", "records"):
@@ -1652,24 +1654,22 @@ class ToolboxPlugin(Star):
             cache = {
                 "messages": [],
                 "seen": set(),
-                "next_seq": 0,
+                "last_fetch_count": 0,
                 "exhausted": False,
                 "updated_at": int(datetime.now().timestamp()),
             }
             self._history_pagination_cache[cache_key] = cache
 
-        async def _call_history(seq: int, fetch_count: int) -> Any:
+        async def _call_history(fetch_count: int) -> Any:
             if mode == "group":
                 return await client.call_action(
                     "get_group_msg_history",
                     group_id=target_id,
-                    #message_seq=seq,
                     count=fetch_count,
                 )
             return await client.call_action(
                 "get_friend_msg_history",
                 user_id=target_id,
-                #message_seq=seq,
                 count=fetch_count,
             )
 
@@ -1682,8 +1682,10 @@ class ToolboxPlugin(Star):
                     break
                 fetch_rounds += 1
 
-                seq_for_call = int(cache.get("next_seq", 0))
-                result = await _call_history(seq_for_call, 100*fetch_rounds)
+                # OneBot 端不支持按 seq 翻页时，只能逐步增大 count 拉取更完整窗口。
+                fetch_count = max(int(cache.get("last_fetch_count", 0)), 0) + 100
+                fetch_count = min(fetch_count, 1000)
+                result = await _call_history(fetch_count)
                 logger.debug(f"历史消息接口返回: {result}")
 
                 batch_messages = self._history_extract_messages(result)
@@ -1706,23 +1708,12 @@ class ToolboxPlugin(Star):
                 cache["seen"] = seen
                 after_count = len(cache["messages"])
                 if after_count == before_count:
-                    # 常见于后端不支持 seq 翻页并重复返回同一批数据。
+                    # count 已扩大但没有新增消息，判定已到历史末尾或接口只返回固定窗口。
                     cache["exhausted"] = True
                     break
 
-                seq_values = []
-                for msg in batch_messages:
-                    seq_num = self._history_pick_seq(msg)
-                    if seq_num >= 0:
-                        seq_values.append(seq_num)
-
-                if seq_values:
-                    next_seq = min(seq_values) - 1
-                    if next_seq >= 0 and next_seq != seq_for_call:
-                        cache["next_seq"] = next_seq
-                    else:
-                        cache["exhausted"] = True
-                else:
+                cache["last_fetch_count"] = fetch_count
+                if len(batch_messages) < fetch_count:
                     cache["exhausted"] = True
 
                 cache["updated_at"] = int(datetime.now().timestamp())
@@ -1755,6 +1746,8 @@ class ToolboxPlugin(Star):
             
             for msg in page_messages:
                 sender_info = msg.get('sender', {})
+                if not isinstance(sender_info, dict):
+                    sender_info = {}
                 sender = sender_info.get('nickname', sender_info.get('user_id', '未知'))
                 time_text = self._history_format_time(msg)
 
