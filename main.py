@@ -1516,11 +1516,12 @@ class ToolboxPlugin(Star):
 
     # ---------------- 工具暴露 ----------------
     @llm_tool("search_koko_tools")
-    async def search_koko_tools(self, event: AstrMessageEvent, query: str = "", **kwargs) -> dict:
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str = None, **kwargs) -> dict:
         """【必须优先使用】根据简短关键词搜索匹配工具。兼容 query/keywords 两种入参。"""
-        if (not query or not str(query).strip()) and isinstance(kwargs, dict):
+        if query is None:
             query = str(kwargs.get("query", "") or kwargs.get("keywords", "") or "")
-        if not query or not query.strip():
+        
+        if not query or not str(query).strip():
             return {"status": "error", "message": "请提供搜索关键词（参数 query 或 keywords，如“天气”、“搜索”、“历史消息”）。注意本工具不是`搜索网页`工具，也不是`获取历史`消息工具，请传入关键词“搜索”或“历史消息”来获取这两个工具的使用方式。"}
 
         available_tools = self._get_available_tools()
