@@ -605,7 +605,7 @@ class ToolboxPlugin(Star):
                     },
                     "required": ["location"]
                 },
-                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气", "天气"],
+                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气", "天气","历史","历史记录"],
                 "handler": self._run_tool_weather_history,
             }
 
@@ -624,7 +624,7 @@ class ToolboxPlugin(Star):
                     },
                     "required": ["query"]
                 },
-                "keywords": ["搜索", "联网", "查资料", "网页搜索", "search", "web"],
+                "keywords": ["搜索", "联网", "查资料", "网页搜索", "search", "web","网页"],
                 "handler": self._run_tool_search,
             }
 
@@ -1516,13 +1516,10 @@ class ToolboxPlugin(Star):
 
     # ---------------- 工具暴露 ----------------
     @llm_tool("search_koko_tools")
-    async def search_koko_tools(self, event: AstrMessageEvent, query: str = None, **kwargs) -> dict:
-        """【必须优先使用】根据简短关键词搜索匹配工具。兼容 query/keywords 两种入参。"""
-        if query is None:
-            query = str(kwargs.get("query", "") or kwargs.get("keywords", "") or "")
-        
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str, **kwargs) -> dict:
+        """【必须优先使用】根据简短关键词搜索匹配工具。"""
         if not query or not str(query).strip():
-            return {"status": "error", "message": "请提供搜索关键词（参数 query 或 keywords，如“天气”、“搜索”、“历史消息”）。注意本工具不是`搜索网页`工具，也不是`获取历史`消息工具，请传入关键词“搜索”或“历史消息”来获取这两个工具的使用方式。"}
+            return {"status": "error", "message": "请提供搜索关键词（参数 query，如“天气”、“搜索”、“历史消息”）。注意本工具不是`搜索网页`工具，也不是`获取历史`消息工具，请传入关键词“搜索”或“历史消息”来获取这两个工具的使用方式。"}
 
         available_tools = self._get_available_tools()
         query_lower = query.strip().lower()
@@ -2418,8 +2415,7 @@ class ToolboxPlugin(Star):
                 if all_messages:
                     return (
                         f"暂无更多历史消息（当前共缓存 {len(all_messages)} 条）。")
-                        #"可尝试将 page 设为 1 重新开始。"
-                    #)
+                        #"可尝试将 page 设为 1 重新开始。")
                 return "暂无历史消息记录"
 
             # 拼装返回摘要文字
