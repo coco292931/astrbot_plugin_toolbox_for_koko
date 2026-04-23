@@ -1516,10 +1516,14 @@ class ToolboxPlugin(Star):
 
     # ---------------- 工具暴露 ----------------
     @llm_tool("search_koko_tools", required_parameters=["query"])
-    async def search_koko_tools(self, event: AstrMessageEvent, query: str, **kwargs) -> dict:
-        """【必须优先使用】根据简短关键词搜索匹配工具。"""
-        if not query or not str(query).strip():
-            return {"status": "error", "message": "请提供搜索关键词（参数 query，如“天气”、“搜索”、“历史消息”）。注意本工具不是`搜索网页`工具，也不是`获取历史`消息工具，请传入关键词“搜索”或“历史消息”来获取这两个工具的使用方式。"}
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str = None, **kwargs) -> dict:
+        """【必须优先使用】根据简短关键词搜索匹配的工具。请使用单个词语或短语（如“天气”、“搜索”、“历史消息”），不要使用完整问句。
+        
+        Args:
+            query(string): 搜索关键词（如“天气”、“搜索”），必填
+        """
+        if not query or not query.strip():
+            return {"status": "error", "message": "请提供搜索关键词（简短词语，如“天气”、“搜索”）"}
 
         available_tools = self._get_available_tools()
         query_lower = query.strip().lower()
@@ -1536,7 +1540,7 @@ class ToolboxPlugin(Star):
                     {
                         "name": name,
                         "description": meta.get("description", ""),
-                        "parameters": meta.get("parameters", {"type": "object", "properties": {}, "required": []}),
+                        "parameters": meta.get("parameters", {"type": "object", "properties": {}, "required": []})
                     }
                 )
 
@@ -1556,7 +1560,7 @@ class ToolboxPlugin(Star):
                     }
             return {
                 "status": "success",
-                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。",
+                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。"
             }
 
         result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
