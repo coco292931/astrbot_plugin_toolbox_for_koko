@@ -260,7 +260,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.3.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.3.3", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -1515,7 +1515,7 @@ class ToolboxPlugin(Star):
             return f"查询位置信息异常: {str(e)}"
 
     # ---------------- 工具暴露 ----------------
-    @llm_tool("search_koko_tools")
+    @llm_tool("search_koko_tools", required_parameters=["query"])
     async def search_koko_tools(self, event: AstrMessageEvent, query: str, **kwargs) -> dict:
         """【必须优先使用】根据简短关键词搜索匹配工具。"""
         if not query or not str(query).strip():
@@ -1956,7 +1956,7 @@ class ToolboxPlugin(Star):
                 extra_historical = "&" + "&".join(extra_parts)
                 day_data = await self._fetch_qweather(api_type, location_id, extra_historical)
                 if day_data.get("code") != "200":
-                    return f"QWeather 历史{('天气' if history_type == 'weather' else '空气')}接口返回错误码: {day_data.get('code')}（date={date_str}）"
+                    return f"QWeather 历史{('天气' if history_type == 'weather' else '空气质量')}接口返回错误码: {day_data.get('code')}（date={date_str}）"
                 historical_list.append(day_data)
 
             if not full_history and self.enable_weather_summary:
@@ -2415,7 +2415,7 @@ class ToolboxPlugin(Star):
                 if all_messages:
                     return (
                         f"暂无更多历史消息（当前共缓存 {len(all_messages)} 条）。")
-                        #"可尝试将 page 设为 1 重新开始。")
+                        #"可尝试将 page 设为 1 重新开始。"
                 return "暂无历史消息记录"
 
             # 拼装返回摘要文字
