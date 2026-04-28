@@ -129,6 +129,8 @@ class MemoryManager:
     ) -> List[dict]:
         data = self._load_data()
         memories = data.get("memories", [])
+        if user_id == "admin":
+            memories = [m for m in memories if 1==1]
         if user_id:
             memories = [m for m in memories if m.get("user_id") == str(user_id)]
         if keyword:
@@ -1778,6 +1780,22 @@ class ToolboxPlugin(Star):
         if sub == "list":
             user_id = args[2] if len(args) > 2 else None
             memories = await self.memory_manager.get_memories(user_id=user_id, limit=50)
+            if not memories:
+                await event.send(MessageChain().message("暂无记忆"))
+                return
+
+            lines = [f"记忆列表（共{len(memories)}条）"]
+            for memory in memories:
+                content = str(memory.get("content", "") or "")
+                lines.append(
+                    f"{memory.get('id')} | {memory.get('user_id')} | {content[:30]} | 重要:{memory.get('importance', 5)}"
+                )
+            await event.send(MessageChain().message("\n".join(lines)))
+            return
+
+        if sub == "listall":
+            user_id = args[2] if len(args) > 2 else None
+            memories = await self.memory_manager.get_memories(user_id='admin', limit=100)
             if not memories:
                 await event.send(MessageChain().message("暂无记忆"))
                 return
