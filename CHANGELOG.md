@@ -1,5 +1,19 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [0.4.0] - 2026-05-07
+
+### ✨ 新增
+
+- **Mnemosyne 向量记忆库集成**：
+  - 新增完整的向量数据库前置配置组 (`mnemosyne`)，支持在 WebUI 无缝配置 Milvus/Milvus Lite（如 `milvus_lite_path`、`address`、`collection_name`）及认证参数。
+  - 新增桥接层，用来配合 [astrbot_plugin_mnemosyne](https://github.com/lxfight/astrbot_plugin_mnemosyne.git) 插件使用，可以直接在这里配好参数并注入给对方实例。
+  - 新增 `/memory` 核心命令组与路由透传机制（支持把 `list`, `list_records` 等命令转发给 Mnemosyne 去查询数据）。
+  - 新增向量记忆查询功能
+
+### 🔧 变更
+
+- **依赖环境更新**：在 `requirements.txt` 中正式引入了 `pymilvus>=2.4.6` 安装要求以支持与 Milvus 环境对接。
+
 ## [0.3.0] - 2026-04-23
 
 ### ✨ 新增

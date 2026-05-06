@@ -216,5 +216,81 @@
                 }
             }
         }
+    },
+    "mnemosyne": {
+        "description": "Mnemosyne / 向量数据库配置",
+        "type": "object",
+        "hint": "仅提供配置展示与读取；CRUD 转发由 Mnemosyne 插件实现。",
+        "items": {
+            "embedding_provider_id": {
+                "description": "Embedding Provider ID",
+                "hint": "AstrBot 提供商 ID（EmbeddingProvider），用于向量化 query。",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+            },
+            "milvus_lite_path": {
+                "description": "Milvus Lite 路径",
+                "hint": "可选。配置后优先使用 Milvus Lite（sqlite 文件）。",
+                "type": "string",
+                "default": ""
+            },
+            "address": {
+                "description": "Milvus 地址",
+                "hint": "例如 127.0.0.1:19530 或 http(s)://...；不填则只能用 milvus_lite_path。",
+                "type": "string",
+                "default": ""
+            },
+            "db_name": {
+                "description": "数据库名（可选）",
+                "hint": "Milvus 多 DB 场景可用；不确定可留空。",
+                "type": "string",
+                "default": ""
+            },
+            "collection_name": {
+                "description": "集合名",
+                "hint": "向量集合名称。",
+                "type": "string",
+                "default": ""
+            },
+            "use_session_filtering": {
+                "description": "启用会话过滤",
+                "hint": "与 Mnemosyne 配置一致。",
+                "type": "bool",
+                "default": false
+            },
+            "platform_blacklist": {
+                "description": "平台黑名单",
+                "hint": "与 Mnemosyne 配置一致；例如 [\"qq\", \"telegram\"]。",
+                "type": "list",
+                "items": {"type": "string"},
+                "default": []
+            },
+            "authentication": {
+                "description": "认证信息",
+                "hint": "与 Mnemosyne 配置一致（token/user/password）。",
+                "type": "object",
+                "items": {
+                    "token": {
+                        "description": "Token",
+                        "hint": "可选。",
+                        "type": "string",
+                        "default": ""
+                    },
+                    "user": {
+                        "description": "用户名",
+                        "hint": "可选。",
+                        "type": "string",
+                        "default": ""
+                    },
+                    "password": {
+                        "description": "密码",
+                        "hint": "可选。",
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            }
+        }
     }
 }

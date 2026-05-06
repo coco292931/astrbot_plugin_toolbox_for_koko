@@ -206,6 +206,7 @@ local_test_runner.py
 _conf_schema_config.json
 .cursorignore
 .cursorindexingignore
+vector_search.py
 
 # Marimo
 marimo/_static/

@@ -11,6 +11,7 @@
   - **SSRF 深度防御**：自动阻止私有 IP、本地回环及云平台元数据地址，防止内网穿透。
   - **AI 智能总结**：网页内容过长时，可自动调用 LLM 进行提炼，避免 Token 溢出。
 - 📜 **历史聊天记录寻回**：支持群聊和私聊历史消息拉取。精简数据结构，大幅降低复盘场景下的 Token 开销。
+- 🧠 **支持 Mnemosyne 向量记忆库**：使用桥接层，配合 [astrbot_plugin_mnemosyne](https://github.com/lxfight/astrbot_plugin_mnemosyne.git) 插件使用，方便llm转发操作指令，并实现记忆查询功能。
 
 ## ✨ 新增功能
 
@@ -45,6 +46,12 @@
 - **enable_keyword_capture_reply**: 开启后，消息命中关键词时会尝试自动回复。
 - **keyword_capture_words**: 触发回复的关键词列表（如 `["koko", "可可"]`）。
 - **keyword_capture_reply_probability**: 命中后回复的概率（`0` ~ `1.0`）。
+
+### 🧠 向量数据库引擎 (mnemosyne)
+
+- **embedding_provider_id**: 指定用于文档及搜索的特征向量嵌入大模型供应商 ID（如使用 Ollama、OpenAI 等对应 Provider）。
+- **milvus_lite_path / address**: 本地或远程的 Milvus 数据库地址。配置 `milvus_lite_path` 优先使用单文件 SQLite版 Milvus。
+- **collection_name / db_name**: 数据存放的集合。
 
 ## 🚀 智能化工具调用机制
 
