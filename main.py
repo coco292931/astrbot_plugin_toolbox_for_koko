@@ -262,7 +262,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.3.3", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.3.5", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -952,7 +952,7 @@ class ToolboxPlugin(Star):
         return f"✅ 记忆已保存\nID: {memory_id}\n内容: {preview}"
 
     async def _handle_search_memories(self, event: AstrMessageEvent, args: dict) -> str:
-        keyword = str(args.get("keyword", "") or "").strip()
+        keywords = str(args.get("keyword", "") or "").strip()
         user_specific = self._safe_bool(args.get("user_specific", True), True)
 
         raw_limit = args.get("limit", 10)
@@ -964,18 +964,47 @@ class ToolboxPlugin(Star):
 
         forced_user_id = str(args.get("user_id", "") or "").strip()
         user_id = forced_user_id or (str(event.get_sender_id()) if user_specific else None)
-        memories = await self.memory_manager.get_memories(
-            user_id=user_id,
-            keyword=keyword if keyword else None,
-            limit=limit,
-        )
+
+        # 支持多关键词搜索（空格分隔）。为空时回退为不带 keyword 的普通查询。
+        seen_keywords = set()
+        keyword_list: list[str] = []
+        for kw in keywords.split():
+            k = kw.strip()
+            if not k or k in seen_keywords:
+                continue
+            seen_keywords.add(k)
+            keyword_list.append(k)
+
+        if not keyword_list:
+            memories = await self.memory_manager.get_memories(
+                user_id=user_id,
+                keyword=None,
+                limit=limit,
+            )
+        else:
+            memories_by_id: dict[str, dict] = {}
+            for keyword in keyword_list:
+                results = await self.memory_manager.get_memories(
+                    user_id=user_id,
+                    keyword=keyword,
+                    limit=limit,
+                )
+                for memory in results:
+                    memory_id = str(memory.get("id", "") or "")
+                    if memory_id and memory_id not in memories_by_id:
+                        memories_by_id[memory_id] = memory
+
+            memories = list(memories_by_id.values())
+            memories.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+            memories = memories[:limit]
+
         if not memories:
-            if keyword:
-                return f"📭 未找到包含「{keyword}」的记忆"
+            if keywords:
+                return f"📭 未找到包含「{keywords}」的记忆"
             return "📭 暂无记忆"
 
         lines = [f"📚 找到 {len(memories)} 条记忆："]
-        for index, memory in enumerate(memories, 1):
+        for index, memory in enumerate(memories[:limit], 1):
             tags = memory.get("tags", []) or []
             tags_text = f"[{', '.join(tags)}]" if tags else ""
             content = str(memory.get("content", "") or "")
@@ -1517,66 +1546,95 @@ class ToolboxPlugin(Star):
             return f"查询位置信息异常: {str(e)}"
 
     # ---------------- 工具暴露 ----------------
-    @llm_tool("search_koko_tools", required_parameters=["query"])
-    async def search_koko_tools(self, event: AstrMessageEvent, query: str = None, **kwargs) -> dict:
-        """【必须优先使用】根据简短关键词搜索匹配的工具。请使用单个词语或短语（如“天气”、“搜索”、“历史消息”），不要使用完整问句。
-        
+    @filter.llm_tool(name="search_koko_tools")
+    async def search_koko_tools(self, event: AstrMessageEvent, query: str) -> dict:
+        """【必须优先使用】根据简短关键词搜索匹配工具。支持多个关键词（通过空格分隔）。
+
+        - 本插件工具优先命中；
+        - 对于未命中关键词，会自动转发到 wyc 的 `search_wyc_tools` 做兼容检索。
+
         Args:
-            query(string): 搜索关键词（如“天气”、“搜索”），必填
+            query(string): 搜索关键词（如“天气 搜索 历史消息”），必填
         """
         if not query or not query.strip():
-            return {"status": "error", "message": "请提供搜索关键词（简短词语，如“天气”、“搜索”）"}
-
-        available_tools = self._get_available_tools()
-        query_lower = query.strip().lower()
-        matched = []
-
-        for name, meta in available_tools.items():
-            keywords = meta.get("keywords", [])
-            if (
-                query_lower in name.lower()
-                or query_lower in meta.get("description", "").lower()
-                or any(query_lower in str(kw).lower() for kw in keywords)
-            ):
-                matched.append(
-                    {
-                        "name": name,
-                        "description": meta.get("description", ""),
-                        "parameters": meta.get("parameters", {"type": "object", "properties": {}, "required": []})
-                    }
-                )
-
-        if not matched:
-            wyc_result = await self._forward_search_to_wyc(event, query.strip())
-            if isinstance(wyc_result, dict):
-                wyc_message = str(wyc_result.get("message", "") or "").strip()
-                if wyc_message:
-                    return {
-                        "status": "success",
-                        "message": (
-                            f"koko 工具未命中，已自动转发至 wyc 工具检索。\n"
-                            f"{wyc_message}"
-                        ),
-                        "forwarded_to": "search_wyc_tools",
-                        "wyc_result": wyc_result,
-                    }
             return {
-                "status": "success",
-                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。"
+                "status": "error",
+                "message": "请提供搜索关键词（简短词语，如“天气 搜索”）",
             }
 
-        result_lines = [f"🔍 找到 {len(matched)} 个相关工具："]
-        for tool in matched[:10]:
-            params = tool.get("parameters", {}) if isinstance(tool, dict) else {}
-            props = params.get("properties", {}) if isinstance(params, dict) else {}
-            param_keys = list(props.keys()) if isinstance(props, dict) else []
-            params_text = ", ".join(param_keys) if param_keys else "无"
-            result_lines.append(
-                f"- {tool['name']}: {tool['description'][:60]}...\n"
-                f"  参数: {params_text}"
-            )
+        available_tools = self._get_available_tools()
 
-        return {"status": "success", "message": "\n".join(result_lines), "tools": matched}
+        seen_words = set()
+        query_words: list[str] = []
+        for word in query.split():
+            w = word.strip().lower()
+            if not w or w in seen_words:
+                continue
+            seen_words.add(w)
+            query_words.append(w)
+
+        local_matched_by_name: dict[str, dict] = {}
+        wyc_messages: list[str] = []
+        wyc_results: list[dict] = []
+
+        for query_word in query_words:
+            word_matched_any = False
+            for name, meta in available_tools.items():
+                description = str(meta.get("description", "") or "")
+                keywords = meta.get("keywords", []) or []
+                if (
+                    query_word in str(name).lower()
+                    or query_word in description.lower()
+                    or any(query_word in str(kw).lower() for kw in keywords)
+                ):
+                    word_matched_any = True
+                    if name not in local_matched_by_name:
+                        local_matched_by_name[name] = {
+                            "name": name,
+                            "description": description,
+                            "parameters": meta.get(
+                                "parameters",
+                                {"type": "object", "properties": {}, "required": []},
+                            ),
+                        }
+
+            # 本地未命中：按关键词转发 wyc
+            if not word_matched_any:
+                wyc_result = await self._forward_search_to_wyc(event, query_word)
+                if isinstance(wyc_result, dict):
+                    wyc_message = str(wyc_result.get("message", "") or "").strip()
+                    if wyc_message:
+                        wyc_messages.append(f"【{query_word}】\n{wyc_message}")
+                    wyc_results.append({"keyword": query_word, "wyc_result": wyc_result})
+
+        local_matched = list(local_matched_by_name.values())
+
+        if not local_matched and not wyc_messages:
+            return {
+                "status": "success",
+                "message": f"未找到与「{query}」相关的工具，可尝试其他关键词或使用 call_koko_tools 查看全部可用工具。注意本工具不是`搜索网页`工具，也不是`获取历史`消息工具，请传入关键词“搜索”或“历史消息”来获取这两个工具的使用方式。",
+            }
+
+        lines: list[str] = []
+        if local_matched:
+            lines.append(f"🔍 (koko) 找到 {len(local_matched)} 个相关工具：")
+            for tool in local_matched[:10]:
+                lines.append(f"- {tool['name']}: {str(tool.get('description', '') or '')[:60]}...")
+
+        if wyc_messages:
+            if lines:
+                lines.append("\n🔁 未命中关键词已转发 wyc：")
+            else:
+                lines.append("🔁 未命中关键词已转发 wyc：")
+            lines.extend(wyc_messages)
+
+        resp: dict = {"status": "success", "message": "\n".join(lines)}
+        if local_matched:
+            resp["tools"] = local_matched
+        if wyc_results:
+            resp["forwarded_to"] = "search_wyc_tools"
+            resp["wyc_results"] = wyc_results
+        return resp
 
     @llm_tool("call_koko_tools")
     async def call_koko_tools(self, event: AstrMessageEvent, **kwargs) -> dict:
@@ -1704,7 +1762,7 @@ class ToolboxPlugin(Star):
             return "llm_compress 参数无效：仅支持 inherit、summary、truncate。"
         return await self._get_from_url(
             normalized_url,
-            use_legacy=self._safe_bool(skip_filter, False),
+            use_legacy=skip_filter,
             llm_compress=llm_compress_mode,
         )
 
@@ -2436,8 +2494,9 @@ class ToolboxPlugin(Star):
             if not page_messages:
                 if all_messages:
                     return (
-                        f"暂无更多历史消息（当前共缓存 {len(all_messages)} 条）。")
+                        f"暂无更多历史消息（当前共缓存 {len(all_messages)} 条）。"
                         #"可尝试将 page 设为 1 重新开始。"
+                    )
                 return "暂无历史消息记录"
 
             # 拼装返回摘要文字
