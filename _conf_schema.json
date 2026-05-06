@@ -227,7 +227,7 @@
                 "hint": "AstrBot 提供商 ID（EmbeddingProvider），用于向量化 query。",
                 "type": "string",
                 "default": "",
-                "_special": "select_provider"
+                "_special": "get_embedding_dim"
             },
             "milvus_lite_path": {
                 "description": "Milvus Lite 路径",
@@ -245,7 +245,7 @@
                 "description": "数据库名（可选）",
                 "hint": "Milvus 多 DB 场景可用；不确定可留空。",
                 "type": "string",
-                "default": ""
+                "default": "default"
             },
             "collection_name": {
                 "description": "集合名",
