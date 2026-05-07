@@ -2432,7 +2432,7 @@ class ToolboxPlugin(Star):
 
         await event.send(MessageChain().message("未知子命令，可用: list, add, delete, update, get"))
 
-search    # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
+# ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
     @filter.llm_tool(name="search_memory_vector")
     async def search_memory_vector(
         self,
