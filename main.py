@@ -2488,7 +2488,7 @@ class ToolboxPlugin(Star):
 
         Args:
             collection_name(string): 集合名，可选
-            limit(integer): 返回条数，默认 5，最大 50
+            limit(int): 返回条数，默认 5，最大 50
         """
         try:
             collection_name = (collection_name or "").strip() or None
