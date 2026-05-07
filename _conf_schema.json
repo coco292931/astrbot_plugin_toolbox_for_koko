@@ -224,10 +224,10 @@
         "items": {
             "embedding_provider_id": {
                 "description": "Embedding Provider ID",
-                "hint": "AstrBot 提供商 ID（EmbeddingProvider），用于向量化 query。",
+                "hint": "选择用于向量嵌入的 Embedding Provider。留空则自动使用 AstrBot 中配置的第一个 Embedding Provider。",
                 "type": "string",
-                "default": "",
-                "_special": "get_embedding_dim"
+                "_special": "select_embedding_provider",
+                "default": ""
             },
             "milvus_lite_path": {
                 "description": "Milvus Lite 路径",
@@ -251,7 +251,7 @@
                 "description": "集合名",
                 "hint": "向量集合名称。",
                 "type": "string",
-                "default": ""
+                "default": "default"
             },
             "use_session_filtering": {
                 "description": "启用会话过滤",

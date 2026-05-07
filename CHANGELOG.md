@@ -7,8 +7,7 @@
 - **Mnemosyne 向量记忆库集成**：
   - 新增完整的向量数据库前置配置组 (`mnemosyne`)，支持在 WebUI 无缝配置 Milvus/Milvus Lite（如 `milvus_lite_path`、`address`、`collection_name`）及认证参数。
   - 新增桥接层，用来配合 [astrbot_plugin_mnemosyne](https://github.com/lxfight/astrbot_plugin_mnemosyne.git) 插件使用，可以直接在这里配好参数并注入给对方实例。
-  - 新增 `/memory` 核心命令组与路由透传机制（支持把 `list`, `list_records` 等命令转发给 Mnemosyne 去查询数据）。
-  - 新增向量记忆查询功能
+  - 新增 LLM 内部工具（非用户命令），用于对 Mnemosyne 进行集合/记录管理转发，并提供向量记忆查询能力。
 
 ### 🔧 变更
 

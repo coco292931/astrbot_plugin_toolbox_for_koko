@@ -285,7 +285,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.4.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "0.4.1", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -381,7 +381,7 @@ class ToolboxPlugin(Star):
             20,
         )
 
-        # Mnemosyne / 向量数据库配置（用于 /memory 转发层与 search）
+        # Mnemosyne / 向量数据库配置（用于内部向量检索 + Mnemosyne 插件转发）
         self.mnemosyne_embedding_provider_id = str(
             self.config.get("embedding_provider_id", "") or ""
         ).strip()
@@ -794,14 +794,15 @@ class ToolboxPlugin(Star):
             "handler": self._run_tool_get_memory_detail,
         }
 
-        registry["add_memory_vector"] = {
-            "name": "add_memory_vector",
+        registry["search_memory_vector"] = {
+            "name": "search_memory_vector",
             "description": "在 Mnemosyne 向量数据库中进行相似度查找（向量检索）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "查询文本，必填"},
                     "top_k": {"type": "integer", "description": "返回条数，默认5，最大50"},
+                    "collection_name": {"type": "string", "description": "集合名，可选，覆盖配置中的 collection_name"},
                 },
                 "required": ["query"],
             },
@@ -815,7 +816,7 @@ class ToolboxPlugin(Star):
                 "vector",
                 "search",
             ],
-            "handler": self._run_tool_add_memory_vector,
+            "handler": self._run_tool_search_memory_vector,
         }
 
         registry["list_memory_vector"] = {
@@ -1038,7 +1039,7 @@ class ToolboxPlugin(Star):
         mnemo_plugin = self._get_mnemosyne_plugin_instance()
         if not mnemo_plugin:
             await event.send(
-                MessageChain().message("未找到 Mnemosyne 插件实例，无法转发 /memory 指令")
+                MessageChain().message("未找到 Mnemosyne 插件实例，无法转发记忆相关操作")
             )
             return
 
@@ -1063,7 +1064,7 @@ class ToolboxPlugin(Star):
             elif result is not None:
                 yield result
         except Exception as e:
-            logger.error(f"[/memory] 转发 Mnemosyne 失败 {fn_name}: {e}")
+            logger.error(f"[mnemosyne] 转发 Mnemosyne 失败 {fn_name}: {e}")
             await event.send(MessageChain().message(f"转发 Mnemosyne 失败：{e}"))
 
     def _get_mnemosyne_auth_params(self) -> dict:
@@ -1112,7 +1113,12 @@ class ToolboxPlugin(Star):
             kw["db_name"] = self.mnemosyne_db_name
         return alias, kw
 
-    async def _mnemosyne_vector_search(self, query: str, top_k: int = 5) -> list[dict]:
+    async def _mnemosyne_vector_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        collection_name: str | None = None,
+    ) -> list[dict]:
         try:
             from pymilvus import connections, Collection, utility
         except Exception as e:
@@ -1123,17 +1129,27 @@ class ToolboxPlugin(Star):
         if not query.strip():
             return []
 
-        if not self.mnemosyne_collection_name:
-            raise RuntimeError("缺少 collection_name 配置")
+        effective_collection_name = (collection_name or "").strip() or self.mnemosyne_collection_name
+        if not effective_collection_name:
+            raise RuntimeError("缺少 collection_name：请在工具参数传入 collection_name，或在配置中设置 mnemosyne.collection_name")
 
-        if not self.mnemosyne_embedding_provider_id:
-            raise RuntimeError("缺少 embedding_provider_id 配置")
+        provider = None
+        provider_id = (self.mnemosyne_embedding_provider_id or "").strip()
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+        if provider is None:
+            # 与 Mnemosyne 插件保持一致：留空时自动使用第一个 Embedding Provider
+            try:
+                providers = self.context.get_all_embedding_providers()
+            except Exception:
+                providers = []
+            provider = providers[0] if providers else None
 
-        provider = self.context.get_provider_by_id(self.mnemosyne_embedding_provider_id)
         get_embedding = getattr(provider, "get_embedding", None) if provider else None
         if not callable(get_embedding):
             raise RuntimeError(
-                f"embedding_provider_id={self.mnemosyne_embedding_provider_id} 不可用或不是 EmbeddingProvider"
+                "未配置可用的 EmbeddingProvider：请在配置中填写 mnemosyne.embedding_provider_id，"
+                "或在 AstrBot 中至少启用一个 Embedding Provider 以便自动选择"
             )
 
         query_vector = await get_embedding(query)
@@ -1147,10 +1163,10 @@ class ToolboxPlugin(Star):
         # 幂等连接：重复 connect 同 alias 会覆盖/复用
         connections.connect(alias=alias, **connect_kwargs)
 
-        if not utility.has_collection(self.mnemosyne_collection_name, using=alias):
-            raise RuntimeError(f"Milvus 集合不存在：{self.mnemosyne_collection_name}")
+        if not utility.has_collection(effective_collection_name, using=alias):
+            raise RuntimeError(f"Milvus 集合不存在：{effective_collection_name}")
 
-        collection = Collection(self.mnemosyne_collection_name, using=alias)
+        collection = Collection(effective_collection_name, using=alias)
         try:
             collection.load()
         except Exception:
@@ -1247,8 +1263,8 @@ class ToolboxPlugin(Star):
     async def _run_tool_search_memories(self, event: AstrMessageEvent, args: dict) -> str:
         return await self._handle_search_memories(event, args)
 
-    async def _run_tool_add_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
-        return await self._handle_add_memory_vector(event, args)
+    async def _run_tool_search_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self._handle_search_memory_vector(event, args)
 
     async def _run_tool_list_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
         return await self._handle_list_memory_vector(event)
@@ -1420,10 +1436,12 @@ class ToolboxPlugin(Star):
             )
         return "\n".join(lines)
 
-    async def _handle_add_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _handle_search_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
         query = str(args.get("query", "") or "").strip()
         if not query:
             return "❌ 参数缺失：请提供 query。"
+
+        collection_name = str(args.get("collection_name", "") or "").strip() or None
 
         raw_top_k = args.get("top_k", 5)
         try:
@@ -1433,7 +1451,11 @@ class ToolboxPlugin(Star):
         top_k = max(1, min(top_k, 50))
 
         try:
-            results = await self._mnemosyne_vector_search(query=query, top_k=top_k)
+            results = await self._mnemosyne_vector_search(
+                query=query,
+                top_k=top_k,
+                collection_name=collection_name,
+            )
         except Exception as e:
             return f"❌ 向量检索失败: {e}"
 
@@ -2410,70 +2432,15 @@ class ToolboxPlugin(Star):
 
         await event.send(MessageChain().message("未知子命令，可用: list, add, delete, update, get"))
 
-    @filter.command_group("memory")
-    def memory(self) -> None:
-        """Mnemosyne 记忆向量库（转发层 + 查找）。"""
-
-    @memory.command("list")
-    async def memory_list(self, event: AstrMessageEvent):
-        async for item in self._forward_to_mnemosyne(event, "list_collections_cmd"):
-            yield item
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @memory.command("list_records")
-    async def memory_list_records(
-        self, event: AstrMessageEvent, collection_name: str = "", limit: int = 5
-    ):
-        collection_name = (collection_name or "").strip() or None
-        async for item in self._forward_to_mnemosyne(
-            event,
-            "list_records_cmd",
-            collection_name=collection_name,
-            limit=limit,
-        ):
-            yield item
-
-    @memory.command("remember")
-    async def memory_remember(self, event: AstrMessageEvent, content: str = ""):
-        content = (content or "").strip()
-        if not content:
-            await event.send(MessageChain().message("用法：/memory remember <内容>"))
-            return
-        async for item in self._forward_to_mnemosyne(event, "remember_cmd", content=content):
-            yield item
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @memory.command("delete_record")
-    async def memory_delete_record(
+search    # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
+    @filter.llm_tool(name="search_memory_vector")
+    async def search_memory_vector(
         self,
         event: AstrMessageEvent,
-        memory_id: str = "",
-        session_id: str = "",
-        confirm: str = "",
-    ):
-        memory_id = (memory_id or "").strip()
-        session_id = (session_id or "").strip() or None
-        confirm = (confirm or "").strip() or None
-        if not memory_id:
-            await event.send(
-                MessageChain().message(
-                    "用法：/memory delete_record <memory_id> [session_id] [confirm]"
-                )
-            )
-            return
-
-        async for item in self._forward_to_mnemosyne(
-            event,
-            "delete_record_cmd",
-            memory_id=memory_id,
-            session_id=session_id,
-            confirm=confirm,
-        ):
-            yield item
-
-    # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
-    @filter.llm_tool(name="add_memory_vector")
-    async def add_memory_vector(self, event: AstrMessageEvent, query: str, top_k: int = 5) -> dict:
+        query: str,
+        top_k: int = 5,
+        collection_name: str = "",
+    ) -> dict:
         """向量库查找（Mnemosyne/Milvus）。
 
         注意：这是给 LLM 函数调用的内部工具，不提供为用户指令。
@@ -2481,6 +2448,7 @@ class ToolboxPlugin(Star):
         Args:
             query(string): 查询文本，必填
             top_k(int): 返回条数，默认 5，最大 50
+            collection_name(string): 可选，覆盖配置中的 collection_name
         """
 
         query = (query or "").strip()
@@ -2488,7 +2456,11 @@ class ToolboxPlugin(Star):
             return {"status": "error", "message": "缺少 query 参数"}
 
         try:
-            results = await self._mnemosyne_vector_search(query=query, top_k=top_k)
+            results = await self._mnemosyne_vector_search(
+                query=query,
+                top_k=top_k,
+                collection_name=collection_name,
+            )
         except Exception as e:
             return {"status": "error", "message": f"向量查找失败：{e}"}
 
@@ -2512,7 +2484,12 @@ class ToolboxPlugin(Star):
     async def list_records_memory_vector(
         self, event: AstrMessageEvent, collection_name: str = "", limit: int = 5
     ) -> dict:
-        """列出 Mnemosyne 集合中的记录（供 LLM 内部调用）。"""
+        """列出 Mnemosyne 集合中的记录（供 LLM 内部调用）。
+
+        Args:
+            collection_name(string): 集合名，可选
+            limit(integer): 返回条数，默认 5，最大 50
+        """
         try:
             collection_name = (collection_name or "").strip() or None
             limit = max(1, min(int(limit or 5), 50))
@@ -2528,7 +2505,11 @@ class ToolboxPlugin(Star):
 
     @filter.llm_tool(name="remember_memory_vector")
     async def remember_memory_vector(self, event: AstrMessageEvent, content: str) -> dict:
-        """写入记忆到 Mnemosyne（供 LLM 内部调用）。"""
+        """写入记忆到 Mnemosyne（供 LLM 内部调用）。
+
+        Args:
+            content(string): 记忆内容，必填
+        """
         content = (content or "").strip()
         if not content:
             return {"status": "error", "message": "缺少 content 参数"}
@@ -2546,7 +2527,13 @@ class ToolboxPlugin(Star):
         session_id: str = "",
         confirm: str = "",
     ) -> dict:
-        """删除 Mnemosyne 记录（供 LLM 内部调用）。"""
+        """删除 Mnemosyne 记录（供 LLM 内部调用）。
+
+        Args:
+            memory_id(string): 记录ID(memory_id)，必填
+            session_id(string): 会话ID，可选
+            confirm(string): 确认参数，可选（由 Mnemosyne 定义）
+        """
         memory_id = (memory_id or "").strip()
         if not memory_id:
             return {"status": "error", "message": "缺少 memory_id 参数"}
