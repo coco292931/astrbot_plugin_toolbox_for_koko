@@ -1,5 +1,32 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.0.0] - 2026-05-09
+
+### ✨ 新增
+
+- **代码架构重构 — 模块化拆分**：
+  - 将原本 1600+ 行的单体 `main.py` 拆分为多个可维护的子模块，项目结构更清晰：
+    - `tools/` — 天气、搜索、网页抓取、历史消息、本地记忆、消息发送、桥接等工具的实现。
+    - `handlers/` — 命令处理器层，提供统一的 `TOOL_HANDLER_MAP` 工具名称到处理函数的映射。
+    - `core/` — 核心基础设施，包含配置加载（`config.py`）与内存管理器（`memory_manager.py`）。
+    - `package.py` — 统一的导出入口，方便其他插件或脚本引用。
+  - 新增 `main.py` 中的延迟导入（lazy imports）机制，避免 `ModuleNotFoundError`。
+- **新增开发调试工具脚本**：
+  - `check_dead_handles.py` — 检查未使用的 handle 注册项。
+  - `find_dead_methods.py` / `find_methods.py` — 查找死方法/分析方法定义。
+  - `find_handle_bounds.py` / `find_qweather_dead.py` / `find_qweather_ranges.py` — 分析工具边界和 QWeather 相关代码。
+- **`.gitignore` 更新**：新增 `main.old.py` 忽略规则，避免旧版文件被误提交。
+
+### 🔧 变更
+
+- **模块化导入**：`main.py` 中所有核心工具函数均改为从 `tools.*` 子模块延迟导入，降低启动耦合度。
+- **配置工具函数迁移**：`_load_schema_defaults`、`_extract_grouped_runtime_config` 等底层配置函数迁移至 `core/config.py`。
+- **内存管理器迁移**：`MemoryManager` 类迁移至 `core/memory_manager.py`，`main.py` 中通过 `from .core.memory_manager import MemoryManager as CoreMemoryManager` 引用。
+
+### ⚙ 配置更新
+
+- 元数据版本号更新至 `1.0.0`，标记架构级重构里程碑。
+
 ## [0.4.0] - 2026-05-07
 
 ### ✨ 新增
@@ -38,7 +65,7 @@
 ### 🔧 变更
 
 - **天气及历史数据精简优化**：
-  - 文案更新，将设置与提示词中的“压缩”统一优化为“精简”，更符合直觉。
+  - 文案更新，将设置与提示词中的"压缩"统一优化为"精简"，更符合直觉。
   - **高保真数据传递**：在使用 LLM 精简天气或空气质量数据时，改为直接将接口返回的原始 JSON 或结构化数据直传给 AI（而非拼接好的字符串），使大模型能够更准确全面地理解原始信息。
 - **网页抓取与系统配置体验优化**：
   - `fetch_url_blocked_targets`（禁用目标列表）类型变更为标准 `list`，在后台可视化编辑中更直观。
@@ -57,7 +84,7 @@
   - **`search_koko_tools`**：根据关键词搜索匹配工具，提升大模型检索效率。
   - **`call_koko_tools`**：获取可用工具列表及参数详情。
   - **`run_koko_tool`**：统一的工具执行入口，支持 JSON 字符串传参。
-- **系统提示词自动注入**：通过 `on_llm_request` 自动向大模型注入工具使用规范，确保模型遵循“先搜索、后调用”的逻辑。
+- **系统提示词自动注入**：通过 `on_llm_request` 自动向大模型注入工具使用规范，确保模型遵循"先搜索、后调用"的逻辑。
 
 ### 🔧 变更
 
@@ -86,7 +113,7 @@
 
 ### 🔧 变更
 
-- **配置加载逻辑增强**：插件启动时会自动读取 `_conf_schema_config.json` 的默认值，并与运行时配置合并；`None` 与空字符串不再覆盖默认配置，减少“看似传参却导致默认值失效”的问题。
+- **配置加载逻辑增强**：插件启动时会自动读取 `_conf_schema_config.json` 的默认值，并与运行时配置合并；`None` 与空字符串不再覆盖默认配置，减少"看似传参却导致默认值失效"的问题。
 - **GeoAPI 路径统一修正**：位置查询接口改为 `/geo/v2/city/lookup`，与和风天气当前路径规范保持一致。
 - **天气位置工具命名调整**：`tool_location` 更名为 `tool_weather_location`，并同步更新帮助文案与错误提示中的引导信息。
 - **搜索工具输出结构优化**：

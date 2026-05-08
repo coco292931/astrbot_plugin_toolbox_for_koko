@@ -207,6 +207,7 @@ _conf_schema_config.json
 .cursorignore
 .cursorindexingignore
 vector_search.py
+main.old.py
 
 # Marimo
 marimo/_static/
