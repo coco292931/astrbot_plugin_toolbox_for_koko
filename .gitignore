@@ -208,6 +208,7 @@ _conf_schema_config.json
 .cursorindexingignore
 vector_search.py
 main.old.py
+package.py
 
 # Marimo
 marimo/_static/
