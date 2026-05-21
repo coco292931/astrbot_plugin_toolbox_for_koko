@@ -28,7 +28,6 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Image, Plain
-from astrbot.api.platform import MessageType
 from astrbot.core.utils.io import download_image_by_url
 
 # 默认中文 prompt 模板
@@ -71,9 +70,7 @@ class KCContextManager:
     # ---- 公开方法 ----
 
     async def record_message(self, event: AstrMessageEvent) -> None:
-        """记录一条群聊消息到上下文缓冲区（不转述图片，仅存 URL）。"""
-        if event.get_message_type() != MessageType.GROUP_MESSAGE:
-            return
+        """记录一条消息到上下文缓冲区（不转述图片，仅存 URL）。"""
         if event.get_sender_id() == event.get_self_id():
             return
 
@@ -116,7 +113,7 @@ class KCContextManager:
                 self._session_chats[umo].pop(0)
 
         logger.debug(
-            f"[kc] 记录消息 - 会话: {umo}，内容: {content[:50]}，图片数: {len(image_urls)}"
+            f"[kc] 记录消息 - 会话: {umo}，内容: {content[:50]}...，图片数: {len(image_urls)}"
         )
 
     async def record_reply(self, event: AstrMessageEvent, reply_text: str) -> None:
@@ -140,7 +137,7 @@ class KCContextManager:
             while len(self._session_chats[umo]) > max_cnt:
                 self._session_chats[umo].pop(0)
 
-        logger.debug(f"[kc] 记录回复 - 会话: {umo}，内容: {reply_text[:50]}")
+        logger.debug(f"[kc] 记录回复 - 会话: {umo}，内容: {reply_text[:50]}...")
 
     async def build_prompt(
         self,
@@ -334,7 +331,7 @@ class KCContextManager:
                 content = entry["content"]
                 for cap in captions:
                     content = content.replace("[Image]", f"[Image: {cap}]", 1)
-                logger.debug(f"[kc] 替换图片占位符 - 内容: {content[:50]}")
+                logger.debug(f"[kc] 替换图片占位符 - 内容: {content[:50]}...")
                 new_entry = dict(entry)
                 new_entry["content"] = content
                 # 写回 result 列表中对应的位置

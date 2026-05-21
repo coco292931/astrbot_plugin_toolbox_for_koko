@@ -262,13 +262,32 @@
             },
             "keyword_capture_context_image_limit": {
                 "description": "图片转述数量上限",
-                "hint": "上下文中最多转述的图片数。设为 0 关闭图片转述。",
+                "hint": "群聊上下文中最多转述的图片数。设为 0 关闭图片转述。",
                 "type": "int",
                 "default": 3
             },
             "keyword_capture_context_prompt": {
                 "description": "上下文注入 prompt 模板",
                 "hint": "可用 {context} 代表群聊上下文, {prompt} 代表用户消息。留空使用内置中文模板。",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
+    "image_caption": {
+        "description": "图片转述前处理（独立于 AstrBot 图片处理）",
+        "type": "object",
+        "hint": "接管 LLM 请求中的图片转述，规避 AstrBot 概率性吞图片的 bug。",
+        "items": {
+            "image_caption_hook_enabled": {
+                "description": "启用图片转述前处理",
+                "hint": "开启后，所有 LLM 请求中的图片将由本插件自行转述，AstrBot 不再处理。",
+                "type": "bool",
+                "default": true
+            },
+            "image_caption_prompt_template": {
+                "description": "图片转述提示词模板",
+                "hint": "可用 {image_type} 代表图片类型（图片/表情包/GIF等）。留空使用默认模板。",
                 "type": "string",
                 "default": ""
             }

@@ -17,6 +17,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
+from .core.image_caption import ImageCaptionHandler
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
 from .tools.weather import run_weather_location, run_weather, run_weather_history
@@ -142,6 +143,15 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)
 
+    image_caption_cfg = raw.get("image_caption", {})
+    if isinstance(image_caption_cfg, dict):
+        for key in (
+            "image_caption_hook_enabled",
+            "image_caption_prompt_template",
+        ):
+            if key in image_caption_cfg:
+                incoming[key] = image_caption_cfg.get(key)
+
     memory_cfg = raw.get("memory", {})
     if isinstance(memory_cfg, dict):
         for key in (
@@ -185,7 +195,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.1.1",
+    "1.1.2",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -263,6 +273,15 @@ class ToolboxPlugin(Star):
 
         # 群聊上下文管理器（仅管理上下文，不与关键词触发耦合）
         self.kc_context = KCContextManager(self)
+
+        # 图片转述前处理（在 on_llm_request 中接管图片转述）
+        self.image_caption_hook_enabled = self._safe_bool(
+            self.config.get("image_caption_hook_enabled", True), True
+        )
+        self.image_caption_prompt_template = str(
+            self.config.get("image_caption_prompt_template", "") or ""
+        ).strip()
+        self.image_caption_handler = ImageCaptionHandler(self)
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(
@@ -611,16 +630,16 @@ class ToolboxPlugin(Star):
             logger.debug(f"[keyword_capture] 处理失败: {e}")
 
     @filter.event_message_type(
-        filter.EventMessageType.GROUP_MESSAGE,
+        filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
         priority=98,
     )
     async def kc_context_recorder(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ):
         """
-        群聊上下文记录器。
+        上下文记录器。
 
-        独立于 keyword_capture_reply_handler 运行，无差别记录所有群聊消息。
+        独立于 keyword_capture_reply_handler 运行，无差别记录所有群聊/私聊消息。
         仅在 keyword_capture_manage_context=True 时生效。
         图片不在此处转述（触发回复时统一转述），仅存 URL。
         """
@@ -1873,6 +1892,10 @@ class ToolboxPlugin(Star):
         self, event: AstrMessageEvent, request: Any, *args, **kwargs
     ) -> None:
         try:
+            # ---- 图片转述前处理：接管图片转述，不让 AstrBot 处理 ----
+            # 独立模块 ImageCaptionHandler 负责下载、降级、类型识别
+            await self.image_caption_handler.process(event, request)
+
             # ---- 撤销 AstrBot LTM 追加的群聊上下文（避免重复） ----
             if event.get_extra("is_keyword_capture_request"):
                 ltm_marker = (

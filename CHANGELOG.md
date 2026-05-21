@@ -1,5 +1,35 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.1.2] - 2026-05-22
+
+### ✨ 新增
+
+- **图片转述前处理（`core/image_caption.py`）**：
+  - 新增 `ImageCaptionHandler`，在 `on_llm_request` 钩子中主动接管图片转述，**不让 AstrBot 处理图片**，从根本上规避其概率性吞图片的 bug。
+  - 检测 `req.image_urls` 有内容时立即清空并自行转述，支持 URL 直传和降级（下载→PIL GIF 取帧→本地路径重试）两种模式。
+  - 自动识别图片类型（通过 OneBot `sub_type` 区分普通图片和表情包），提示词模板支持 `{image_type}` 占位符。
+  - 下载图片后自动读取 AstrBot 压缩配置（`image_compress_enabled/image_compress_options`）进行压缩，避免超大图片导致 Provider 报错。
+  - 新增 `image_caption` 独立配置组，包含 `image_caption_hook_enabled`（开关）和 `image_caption_prompt_template`（自定义提示词模板）。
+  - `image_caption_hook_enabled` 关闭时不影响 `kc_context._transcribe_images`（群聊上下文中的图片转述），两者解耦。
+
+### 🔧 变更
+
+- **`on_llm_request` 重构**：图片处理逻辑从内联代码抽离为独立的 `ImageCaptionHandler.process()` 调用，代码量减少 80%+，逻辑更清晰。
+- **`kc_context_recorder` 扩展**：filter 从 `GROUP_MESSAGE` 扩展为 `GROUP_MESSAGE | PRIVATE_MESSAGE`，私聊消息也可被上下文管理器记录。
+- **`record_message` 移除群聊限制**：不再限制消息类型，私聊消息同样可以存入上下文缓冲区。
+- **`_transcribe_images` 稳定性增强**：URL 转述失败时自动降级（下载→PIL GIF 取帧→本地路径重试），并写入 TTL 缓存避免重复调用。
+- **无历史上下文时返回格式化消息**：`build_prompt` 在无历史注入时返回 `[昵称/时间]: 消息` 格式，保持与有上下文时一致的发送者信息。
+
+### 🏗 项目结构
+
+- 新增 `core/image_caption.py` — 图片转述前处理器模块，与 `core/kc_context.py` 完全解耦，独立维护。
+
+### ⚙ 配置更新
+
+- 新增 `image_caption` 配置组：
+  - `image_caption_hook_enabled`（bool, 默认 true）
+  - `image_caption_prompt_template`（string, 默认 ""）
+
 ## [1.1.0] - 2026-05-21
 
 ### ✨ 新增

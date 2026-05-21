@@ -108,6 +108,15 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)
 
+    image_caption_cfg = raw.get("image_caption", {})
+    if isinstance(image_caption_cfg, dict):
+        for key in (
+            "image_caption_hook_enabled",
+            "image_caption_prompt_template",
+        ):
+            if key in image_caption_cfg:
+                incoming[key] = image_caption_cfg.get(key)
+
     memory_cfg = raw.get("memory", {})
     if isinstance(memory_cfg, dict):
         for key in (

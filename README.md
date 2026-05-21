@@ -5,6 +5,7 @@
 ## ✨ 功能特性
 
 - 💬 **关键词捕捉与群聊主动回复 (Interaction)**：监听特定关键词并按自定义概率触发对话回复。支持基础主动回复概率，未命中关键词时也可在群聊中按概率主动参与对话。内置独立的群聊上下文管理器（`KCContextManager`），记录群聊消息并注入上下文，支持延迟图片转述、自定义 prompt 模板，与 AstrBot LTM 完全解耦。
+- 🖼️ **图片转述前处理 (ImageCaption)**：在 `on_llm_request` 钩子中主动接管图片转述，规避 AstrBot 概率性吞图片的 bug。支持自动识别图片类型（普通图片/表情包/GIF），下载后压缩、GIF 取帧降级，与群聊上下文管理完全解耦。
 - 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可直传原始 JSON 给大模型生成亲切的天气简报。
 - 🔍 **智能联网网页搜索**：集成智谱大模型搜索接口。支持普通/深度搜索、多粒度摘要提取、时效性过滤。
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
@@ -31,7 +32,8 @@ astrbot_plugin_toolbox_for_koko/
 │   ├── __init__.py
 │   ├── config.py             # 配置加载与解析工具函数
 │   ├── memory_manager.py     # 内存管理器（本地 JSON 存储）
-│   └── kc_context.py         # 群聊上下文管理器（KCContextManager）
+│   ├── kc_context.py         # 群聊上下文管理器（KCContextManager）
+│   └── image_caption.py      # 图片转述前处理器（ImageCaptionHandler）
 ├── tools/
 │   ├── __init__.py
 │   ├── weather.py            # 天气查询（位置、实时、多日、历史）
@@ -104,6 +106,11 @@ astrbot_plugin_toolbox_for_koko/
 - **collection_name / db_name**: 数据存放的集合。
 - **use_session_filtering**: 是否启用会话过滤。
 - **platform_blacklist**: 平台黑名单列表。
+
+### 🖼️ 图片转述前处理 (image_caption)
+
+- **image_caption_hook_enabled**: 启用图片转述前处理。开启后所有 LLM 请求中的图片将由本插件自行转述，关闭时不影响群聊上下文中的图片转述。
+- **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型（图片/表情包等）。留空使用默认模板。
 
 ## 🚀 智能化工具调用机制
 
