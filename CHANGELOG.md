@@ -1,6 +1,6 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
-## [1.0.1] - 2026-05-21
+## [1.1.0] - 2026-05-21
 
 ### ✨ 新增
 
@@ -29,6 +29,7 @@
   - 通过 `event.set_extra("is_keyword_capture_request", True)` 标记请求来源，供 `on_llm_request` 识别。
   - 在 `on_llm_request` 中自动撤销 AstrBot LTM 追加的群聊上下文（`"You are now in a chatroom..."`），避免与 Toolbox 自注入上下文重复。
 
+- **`<system_reminder>` 过滤**：在 `on_llm_request` 中自动清理 AstrBot 框架注入的 `<system_reminder>` 运行时上下文标记，避免出现在 keyword_capture 的 LLM 上下文中。
 - **导入优化**：移除 `main.py` 中未使用的 `collections.defaultdict`、`Optional`、`Dict`、`At`、`Image`、`Plain` 导入。
 
 ### 🏗 项目结构
