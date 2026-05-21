@@ -4,7 +4,7 @@
 
 ## ✨ 功能特性
 
-- 💬 **关键词随机捕捉响应 (Interaction)**：监听特定关键词并按自定义概率触发对话回复，活跃群聊氛围。
+- 💬 **关键词捕捉与群聊主动回复 (Interaction)**：监听特定关键词并按自定义概率触发对话回复。支持基础主动回复概率，未命中关键词时也可在群聊中按概率主动参与对话。内置独立的群聊上下文管理器（`KCContextManager`），记录群聊消息并注入上下文，支持延迟图片转述、自定义 prompt 模板，与 AstrBot LTM 完全解耦。
 - 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可直传原始 JSON 给大模型生成亲切的天气简报。
 - 🔍 **智能联网网页搜索**：集成智谱大模型搜索接口。支持普通/深度搜索、多粒度摘要提取、时效性过滤。
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
@@ -30,7 +30,8 @@ astrbot_plugin_toolbox_for_koko/
 ├── core/
 │   ├── __init__.py
 │   ├── config.py             # 配置加载与解析工具函数
-│   └── memory_manager.py     # 内存管理器（本地 JSON 存储）
+│   ├── memory_manager.py     # 内存管理器（本地 JSON 存储）
+│   └── kc_context.py         # 群聊上下文管理器（KCContextManager）
 ├── tools/
 │   ├── __init__.py
 │   ├── weather.py            # 天气查询（位置、实时、多日、历史）
@@ -70,11 +71,24 @@ astrbot_plugin_toolbox_for_koko/
 - **fetch_url_over_limit_mode**: 超限策略 (`truncate` | `ai_summary` | `full`)。
 - **fetch_url_blocked_targets**: 额外禁用的 Host/IP 列表 (JSON 数组或列表)。
 
-### 💬 交互触发 (interaction)
+### 💬 交互触发与群聊上下文管理 (interaction)
 
-- **enable_keyword_capture_reply**: 开启后，消息命中关键词时会尝试自动回复。
+**基础设置：**
+- **enable_keyword_capture_reply**: 总开关。关闭后关键词触发和主动回复均不工作。
 - **keyword_capture_words**: 触发回复的关键词列表（如 `["koko", "可可"]`）。
-- **keyword_capture_reply_probability**: 命中后回复的概率（`0` ~ `1.0`）。
+- **keyword_capture_reply_probability**: 关键词命中后回复的概率（`0` ~ `1.0`）。
+- **keyword_capture_base_probability**: 未命中关键词时在群聊中主动回复的基础概率。设为 `0` 关闭。
+- **keyword_capture_whitelist**: 群聊白名单，仅列表中的群 ID 才会触发。为空不启用。
+
+**会话管理：**
+- **keyword_capture_session_mode**: 会话要求模式。`auto_new`（自动新建）、`active_only`（仅匹配活跃）、`always_new`（每次都新建）。
+
+**群聊上下文管理：**
+- **keyword_capture_manage_context**: 是否由本插件管理群聊上下文并注入。关闭不影响关键词触发。
+- **keyword_capture_context_max_cnt**: Session 缓冲区最大消息数（默认 100）。
+- **keyword_capture_context_history_limit**: 注入后 LLM 对话历史条数（默认 50）。
+- **keyword_capture_context_image_limit**: 上下文中最多转述的图片数（默认 3）。设为 0 关闭图片转述。
+- **keyword_capture_context_prompt**: 上下文注入 prompt 模板。可用 `{context}` 和 `{prompt}` 占位符。留空使用内置中文模板。
 
 ### 📦 内存管理 (memory)
 
