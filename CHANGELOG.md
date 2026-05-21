@@ -1,5 +1,52 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.0.1] - 2026-05-21
+
+### ✨ 新增
+
+- **群聊上下文管理与主动回复增强**：
+  - 新增 `KCContextManager`（`core/kc_context.py`）— 独立于 AstrBot LTM 的群聊上下文管理模块，支持消息记录、延迟图片转述、自定义 prompt 模板注入。
+  - 新增 `keyword_capture_manage_context` 配置开关，与关键词触发功能解耦，可独立开启/关闭。
+  - 新增 `keyword_capture_base_probability` 基础主动回复概率，未命中关键词时也可按概率在群聊中主动回复，活跃群聊氛围。
+  - 新增 `keyword_capture_whitelist` 群聊白名单，支持按群 ID 过滤触发范围。
+  - 新增 `keyword_capture_session_mode` 会话模式，支持 `auto_new`（自动新建）、`active_only`（仅匹配活跃）、`always_new`（每次都新建）三种策略。
+  - 新增 `keyword_capture_context_prompt` 自定义 prompt 模板，支持 `{context}` 和 `{prompt}` 占位符。
+  - 新增 `kc_context_recorder` handler（priority=98），独立于关键词 handler 无差别记录群聊消息，图片仅存 URL 不转述。
+  - 新增 `on_llm_response` 钩子，AI 回复自动记录回上下文缓冲区，形成完整对话闭环。
+  - 新增 `clear_session` 方法清理指定群聊的上下文。
+
+- **配置项扩展**：
+  - `interaction` 配置组从 3 项扩展至 **13 项**，完整支持群聊上下文管理。
+  - 图片转述 Provider 自动探测：优先读取 AstrBot 配置的 `provider_ltm_settings.image_caption_provider_id`，其次尝试第一个可用 Provider。
+  - 图片转述提示词自动读取 AstrBot 配置 `provider_settings.image_caption_prompt`，无需重复配置。
+  - 上下文缓冲区最大消息数（默认 100）和注入 LLM 消息数（默认 50）分别独立配置。
+
+### 🔧 变更
+
+- **`keyword_capture_reply_handler` 重写**：
+  - 支持两种触发模式：关键词命中（使用 `keyword_capture_reply_probability`）和基础主动回复（使用 `keyword_capture_base_probability`）。
+  - 私聊消息必须命中关键词才触发，群聊可同时使用两种模式。
+  - 通过 `event.set_extra("is_keyword_capture_request", True)` 标记请求来源，供 `on_llm_request` 识别。
+  - 在 `on_llm_request` 中自动撤销 AstrBot LTM 追加的群聊上下文（`"You are now in a chatroom..."`），避免与 Toolbox 自注入上下文重复。
+
+- **导入优化**：移除 `main.py` 中未使用的 `collections.defaultdict`、`Optional`、`Dict`、`At`、`Image`、`Plain` 导入。
+
+### 🏗 项目结构
+
+- 新增 `core/kc_context.py` — 群聊上下文管理器模块，与 `main.py` 的 handler 层分离，便于后续维护和扩展。
+
+### ⚙ 配置更新
+
+- 新增配置项（位于 `interaction` 分组下）：
+  - `keyword_capture_base_probability`（float, 默认 0.0）
+  - `keyword_capture_whitelist`（list, 默认 []）
+  - `keyword_capture_session_mode`（string, 默认 "auto_new"）
+  - `keyword_capture_manage_context`（bool, 默认 false）
+  - `keyword_capture_context_max_cnt`（int, 默认 100）
+  - `keyword_capture_context_history_limit`（int, 默认 50）
+  - `keyword_capture_context_image_limit`（int, 默认 3）
+  - `keyword_capture_context_prompt`（string, 默认 ""）
+
 ## [1.0.0] - 2026-05-09
 
 ### ✨ 新增

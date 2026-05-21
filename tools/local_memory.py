@@ -1,4 +1,5 @@
 """本地记忆工具（JSON 文件存储）。"""
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,9 @@ async def handle_add_memory(plugin, event, args: dict) -> str:
         importance = 5
     importance = max(1, min(10, importance))
 
-    memory_id = await plugin.memory_manager.add_memory(user_id, content, tags_list, importance)
+    memory_id = await plugin.memory_manager.add_memory(
+        user_id, content, tags_list, importance
+    )
     preview = f"{content[:50]}{'...' if len(content) > 50 else ''}"
     return f"✅ 记忆已保存\nID: {memory_id}\n内容: {preview}"
 
@@ -113,7 +116,9 @@ async def handle_update_memory(plugin, args: dict) -> str:
         except Exception:
             return "❌ 参数错误：importance 必须是数字。"
 
-    success = await plugin.memory_manager.update_memory(memory_id, content, tags_list, importance)
+    success = await plugin.memory_manager.update_memory(
+        memory_id, content, tags_list, importance
+    )
     return f"✅ 记忆已更新\nID: {memory_id}" if success else "❌ 更新失败"
 
 
@@ -201,8 +206,12 @@ async def handle_search_memory_vector(plugin, event, args: dict) -> str:
 
     try:
         from core.config import run_mnemosyne_vector_search  # fmt: skip
+
         results = await run_mnemosyne_vector_search(
-            plugin, query=query, top_k=top_k, collection_name=collection_name,
+            plugin,
+            query=query,
+            top_k=top_k,
+            collection_name=collection_name,
         )
     except Exception as e:
         return f"❌ 向量检索失败: {e}"
@@ -221,7 +230,9 @@ async def handle_search_memory_vector(plugin, event, args: dict) -> str:
 async def _collect_forwarded_output_text(plugin, event, fn_name: str, **kwargs) -> str:
     parts: list[str] = []
     try:
-        async for item in plugin._forward_to_mnemosyne(event, fn_name, **(kwargs or {})):
+        async for item in plugin._forward_to_mnemosyne(
+            event, fn_name, **(kwargs or {})
+        ):
             text = plugin._extract_llm_text(item)
             if not text:
                 try:
@@ -249,7 +260,9 @@ async def handle_list_records_memory_vector(plugin, event, args: dict) -> str:
         limit = 5
     limit = max(1, min(limit, 50))
     text = await _collect_forwarded_output_text(
-        plugin, event, "list_records_cmd",
+        plugin,
+        event,
+        "list_records_cmd",
         collection_name=collection_name,
         limit=limit,
     )
@@ -260,7 +273,9 @@ async def handle_remember_memory_vector(plugin, event, args: dict) -> str:
     content = str(args.get("content", "") or "").strip()
     if not content:
         return "❌ 参数缺失：请提供 content。"
-    text = await _collect_forwarded_output_text(plugin, event, "remember_cmd", content=content)
+    text = await _collect_forwarded_output_text(
+        plugin, event, "remember_cmd", content=content
+    )
     return text or "(ok)"
 
 
@@ -271,7 +286,9 @@ async def handle_delete_record_memory_vector(plugin, event, args: dict) -> str:
     session_id = str(args.get("session_id", "") or "").strip() or None
     confirm = str(args.get("confirm", "") or "").strip() or None
     text = await _collect_forwarded_output_text(
-        plugin, event, "delete_record_cmd",
+        plugin,
+        event,
+        "delete_record_cmd",
         memory_id=memory_id,
         session_id=session_id,
         confirm=confirm,

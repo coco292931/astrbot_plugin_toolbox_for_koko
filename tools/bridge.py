@@ -3,9 +3,6 @@
 """
 
 import json
-from typing import Any, Optional
-
-from astrbot.api import logger
 
 
 async def run_mnemosyne_bridge(plugin, event, args: dict) -> str:

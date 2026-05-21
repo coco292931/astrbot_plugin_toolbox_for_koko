@@ -8,7 +8,10 @@ from astrbot.api import logger
 
 def load_schema_defaults(schema_config_path: Path | None = None) -> dict:
     """Load default values from local _conf_schema_config.json when available."""
-    cfg_path = schema_config_path or Path(__file__).resolve().parent.parent / "_conf_schema_config.json"
+    cfg_path = (
+        schema_config_path
+        or Path(__file__).resolve().parent.parent / "_conf_schema_config.json"
+    )
     if not cfg_path.exists():
         return {}
 
@@ -93,6 +96,14 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             "enable_keyword_capture_reply",
             "keyword_capture_words",
             "keyword_capture_reply_probability",
+            "keyword_capture_base_probability",
+            "keyword_capture_whitelist",
+            "keyword_capture_session_mode",
+            "keyword_capture_manage_context",
+            "keyword_capture_context_max_cnt",
+            "keyword_capture_context_history_limit",
+            "keyword_capture_context_image_limit",
+            "keyword_capture_context_prompt",
         ):
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)

@@ -3,17 +3,15 @@
 """
 
 import asyncio
-import base64
 import io
 import json
 import ipaddress
 import os
-import re
 import random
 import socket
 import traceback
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 import urllib.parse
 from urllib.parse import urlparse
 
@@ -23,6 +21,7 @@ import aiohttp
 
 try:
     from bs4 import BeautifulSoup
+
     _HAS_BS4 = True
 except ImportError:
     _HAS_BS4 = False
@@ -36,12 +35,14 @@ except ImportError:
 
 try:
     import html2text
+
     _HAS_HTML2TEXT = True
 except ImportError:
     _HAS_HTML2TEXT = False
 
 try:
     from PIL import Image
+
     _HAS_PIL = True
 except ImportError:
     _HAS_PIL = False
@@ -257,7 +258,9 @@ async def _normalize_and_validate_fetch_url(plugin, url: str) -> tuple[bool, str
     return True, url_clean, ""
 
 
-async def _process_fetched_text(plugin, text: str, llm_compress: str = "inherit") -> str:
+async def _process_fetched_text(
+    plugin, text: str, llm_compress: str = "inherit"
+) -> str:
     max_chars = int(getattr(plugin, "fetch_url_max_chars", 6000))
     if len(text) <= max_chars:
         return text
@@ -280,7 +283,9 @@ async def _process_fetched_text(plugin, text: str, llm_compress: str = "inherit"
         return f"{truncated}...\n\n[系统提示] 未配置 fetch_url_summary_llm_provider_id，已回退为截断输出。"
 
     summary_prompt = str(
-        getattr(plugin, "fetch_url_summary_prompt", "请总结网页正文内容，提取关键信息。")
+        getattr(
+            plugin, "fetch_url_summary_prompt", "请总结网页正文内容，提取关键信息。"
+        )
     )
     try:
         prompt = f"{summary_prompt}\n\n网页正文:\n{text}"
@@ -318,7 +323,9 @@ async def _get_from_url(
     }
 
     max_redirects = int(getattr(plugin, "fetch_url_max_redirects", 5))
-    max_download_bytes = int(getattr(plugin, "fetch_url_max_download_bytes", 2 * 1024 * 1024))
+    max_download_bytes = int(
+        getattr(plugin, "fetch_url_max_download_bytes", 2 * 1024 * 1024)
+    )
 
     try:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -349,7 +356,9 @@ async def _get_from_url(
                         return f"抓取网页失败，状态码: {response.status}"
 
                     content_type = (response.headers.get("Content-Type") or "").lower()
-                    is_json = "application/json" in content_type or "+json" in content_type
+                    is_json = (
+                        "application/json" in content_type or "+json" in content_type
+                    )
                     is_html_or_text = (
                         "text/html" in content_type
                         or "application/xhtml+xml" in content_type
@@ -482,13 +491,21 @@ async def run_batch_download(plugin, event, args: dict) -> str:
 
                 async with plugin.session.get(url, timeout=timeout, ssl=False) as resp:
                     if resp.status != 200:
-                        return {"url": url, "status": "error", "msg": f"HTTP {resp.status}"}
+                        return {
+                            "url": url,
+                            "status": "error",
+                            "msg": f"HTTP {resp.status}",
+                        }
 
                     raw = bytearray()
                     async for chunk in resp.content.iter_chunked(8192):
                         raw.extend(chunk)
                         if len(raw) > max_size_mb * 1024 * 1024:
-                            return {"url": url, "status": "error", "msg": f"文件超过{max_size_mb}MB限制"}
+                            return {
+                                "url": url,
+                                "status": "error",
+                                "msg": f"文件超过{max_size_mb}MB限制",
+                            }
 
                     raw_bytes = bytes(raw)
                     if _HAS_PIL:
@@ -496,7 +513,11 @@ async def run_batch_download(plugin, event, args: dict) -> str:
                             img = Image.open(io.BytesIO(raw_bytes))
                             img.verify()
                         except Exception:
-                            return {"url": url, "status": "error", "msg": "图片格式验证失败"}
+                            return {
+                                "url": url,
+                                "status": "error",
+                                "msg": "图片格式验证失败",
+                            }
 
                     with open(filepath, "wb") as f:
                         f.write(raw_bytes)

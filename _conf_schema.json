@@ -185,13 +185,13 @@
         }
     },
     "interaction": {
-        "description": "交互触发配置",
+        "description": "交互触发与群聊上下文管理",
         "type": "object",
-        "hint": "配置关键词捕捉后的回复行为。",
+        "hint": "配置关键词捕捉、主动回复、群聊上下文管理。关闭上下文管理不影响关键词触发。",
         "items": {
             "enable_keyword_capture_reply": {
                 "description": "启用关键词捕捉回复",
-                "hint": "开启后，消息命中关键词时会尝试自动回复。",
+                "hint": "总开关。关闭后关键词触发和主动回复均不工作。",
                 "type": "bool",
                 "default": false
             },
@@ -205,8 +205,8 @@
                 "default": ["koko", "可可"]
             },
             "keyword_capture_reply_probability": {
-                "description": "触发后回复概率",
-                "hint": "范围 0~1，例如 0.7 表示命中关键词后有 70% 概率回复。",
+                "description": "关键词命中回复概率",
+                "hint": "消息命中关键词后回复的概率。范围 0~1。",
                 "type": "float",
                 "default": 0.7,
                 "slider": {
@@ -214,6 +214,63 @@
                     "max": 1,
                     "step": 0.05
                 }
+            },
+            "keyword_capture_base_probability": {
+                "description": "基础主动回复概率",
+                "hint": "未命中关键词时主动回复的概率。0 表示不主动回复。范围 0~1。",
+                "type": "float",
+                "default": 0.0,
+                "slider": {
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.05
+                }
+            },
+            "keyword_capture_whitelist": {
+                "description": "群聊白名单",
+                "hint": "仅在此列表中的群 ID 才会触发。为空时不启用白名单过滤。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "keyword_capture_session_mode": {
+                "description": "会话要求",
+                "hint": "auto_new=自动新建, active_only=仅匹配活跃, always_new=每次都新建。",
+                "type": "string",
+                "default": "auto_new",
+                "options": ["auto_new", "active_only", "always_new"]
+            },
+            "keyword_capture_manage_context": {
+                "description": "由本插件管理群聊上下文",
+                "hint": "开启后记录群聊消息并在回复时注入上下文。关闭不影响关键词触发。",
+                "type": "bool",
+                "default": false
+            },
+            "keyword_capture_context_max_cnt": {
+                "description": "上下文缓冲区最大消息数",
+                "hint": "内存中最多保留的消息条数，超出的最旧消息会被移除。建议 20-200。",
+                "type": "int",
+                "default": 100
+            },
+            "keyword_capture_context_history_limit": {
+                "description": "注入 LLM 的最大消息数",
+                "hint": "每次回复时从缓冲区取出的消息条数上限。建议 10-100。",
+                "type": "int",
+                "default": 50
+            },
+            "keyword_capture_context_image_limit": {
+                "description": "图片转述数量上限",
+                "hint": "上下文中最多转述的图片数。设为 0 关闭图片转述。",
+                "type": "int",
+                "default": 3
+            },
+            "keyword_capture_context_prompt": {
+                "description": "上下文注入 prompt 模板",
+                "hint": "可用 {context} 代表群聊上下文, {prompt} 代表用户消息。留空使用内置中文模板。",
+                "type": "string",
+                "default": ""
             }
         }
     },

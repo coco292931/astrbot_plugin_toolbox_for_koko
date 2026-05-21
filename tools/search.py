@@ -71,16 +71,16 @@ async def handle_search(plugin, args: dict) -> str:
                         err_obj = json.loads(body_text)
                         err_code = err_obj.get("error", {}).get("code", "unknown")
                         err_msg = err_obj.get("error", {}).get("message", body_text)
-                        return (
-                            f"搜索请求失败，状态码: {resp.status}。code: {err_code}，message: {err_msg}"
-                        )
+                        return f"搜索请求失败，状态码: {resp.status}。code: {err_code}，message: {err_msg}"
                     except Exception:
                         return f"搜索请求失败，状态码: {resp.status}。细节: {body_text}"
 
                 data = await resp.json(content_type=None)
-                message = ((data.get("choices") or [{}])[0].get("message") or {})
+                message = (data.get("choices") or [{}])[0].get("message") or {}
                 content = message.get("content", "")
-                web_search = data.get("web_search", []) if isinstance(data, dict) else []
+                web_search = (
+                    data.get("web_search", []) if isinstance(data, dict) else []
+                )
 
                 if content_size == "lite":
                     return f"【极简摘要】\n{content}"

@@ -5,16 +5,18 @@ import inspect
 import ipaddress
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Optional, List, Dict
+from typing import Any, List
 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.all import llm_tool
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.platform import MessageType
 from astrbot.core.message.message_event_result import MessageChain
 
 from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
+from .core.kc_context import KCContextManager
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
 from .tools.weather import run_weather_location, run_weather, run_weather_history
@@ -123,6 +125,14 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "enable_keyword_capture_reply",
             "keyword_capture_words",
             "keyword_capture_reply_probability",
+            "keyword_capture_base_probability",
+            "keyword_capture_whitelist",
+            "keyword_capture_session_mode",
+            "keyword_capture_manage_context",
+            "keyword_capture_context_max_cnt",
+            "keyword_capture_context_history_limit",
+            "keyword_capture_context_image_limit",
+            "keyword_capture_context_prompt",
         ):
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)
@@ -165,7 +175,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "1.0.0", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "1.0.1", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -184,7 +194,9 @@ class ToolboxPlugin(Star):
         # --- 配置加载 ---
         self.qweather_key = self.config.get("qweather_key", "")
         self.qweather_jwt_token = self.config.get("qweather_jwt_token", "")
-        self.qweather_weather_host = self.config.get("qweather_weather_host", "devapi.qweather.com")
+        self.qweather_weather_host = self.config.get(
+            "qweather_weather_host", "devapi.qweather.com"
+        )
         self.qweather_geo_host = self.config.get("qweather_geo_host", "")
         self.zhipu_key = self.config.get("zhipu_key", "")
         
@@ -205,6 +217,38 @@ class ToolboxPlugin(Star):
         self.keyword_capture_words = self._parse_keywords(
             self.config.get("keyword_capture_words", [])
         )
+        self.keyword_capture_base_probability = self._safe_float(
+            self.config.get("keyword_capture_base_probability", 0.0),
+            0.0,
+            0.0,
+            1.0,
+        )
+        self.keyword_capture_whitelist = self._parse_keywords(
+            self.config.get("keyword_capture_whitelist", [])
+        )
+        self.keyword_capture_session_mode = (
+            str(self.config.get("keyword_capture_session_mode", "auto_new"))
+            .strip()
+            .lower()
+        )
+        self.keyword_capture_manage_context = self._safe_bool(
+            self.config.get("keyword_capture_manage_context", False), False
+        )
+        self.keyword_capture_context_max_cnt = self._safe_int(
+            self.config.get("keyword_capture_context_max_cnt", 100), 100, 1, 500
+        )
+        self.keyword_capture_context_history_limit = self._safe_int(
+            self.config.get("keyword_capture_context_history_limit", 50), 50, 1, 500
+        )
+        self.keyword_capture_context_image_limit = self._safe_int(
+            self.config.get("keyword_capture_context_image_limit", 3), 3, 0, 20
+        )
+        self.keyword_capture_context_prompt = str(
+            self.config.get("keyword_capture_context_prompt", "") or ""
+        ).strip()
+
+        # 群聊上下文管理器（仅管理上下文，不与关键词触发耦合）
+        self.kc_context = KCContextManager(self)
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(self.config.get("fetch_url_max_chars"), 6000, 200, 200000)
@@ -231,20 +275,24 @@ class ToolboxPlugin(Star):
 
         # 构建工具注册表（用于 call-search-run 三段式调用）
         self._tool_registry = self._build_tool_registry()
-        
+
         # 7日天气压缩大模型设定的指令
         self.enable_weather_summary = self.config.get("enable_weather_summary", True)
         self.weather_summary_prompt = self.summary_prompt
-        self.weather_summary_llm_provider_id = self.config.get("weather_summary_llm_provider_id", "")
+        self.weather_summary_llm_provider_id = self.config.get(
+            "weather_summary_llm_provider_id", ""
+        )
 
         # 历史消息本地分页缓存
-        self._history_cache_ttl_seconds = 1200 # 20 minutes
+        self._history_cache_ttl_seconds = 1200  # 20 minutes
         self._history_pagination_cache = {}
 
         # 记忆存储
         self.data_dir = Path(__file__).with_name("data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        max_memories_per_user = self._safe_int(self.config.get("max_memories_per_user", 100), 100, 1, 10000)
+        max_memories_per_user = self._safe_int(
+            self.config.get("max_memories_per_user", 100), 100, 1, 10000
+        )
         self.memory_manager = CoreMemoryManager(self.data_dir, max_memories_per_user)
         self.enable_admin_tool_memory_command = self._safe_bool(
             self.config.get("enable_admin_tool_memory_command", True),
@@ -422,12 +470,24 @@ class ToolboxPlugin(Star):
     async def keyword_capture_reply_handler(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
     ):
-        """关键词捕捉回复：命中关键词后按概率直接调用大模型回复用户原消息。"""
+        """
+        关键词捕捉回复 + 群聊主动回复。
+
+        功能说明:
+          - 关键词命中时，使用 keyword_capture_reply_probability
+          - 未命中关键词但处于群聊时，使用 keyword_capture_base_probability（可用于活跃氛围）
+          - 私聊消息始终使用关键词逻辑
+          - 启用 keyword_capture_manage_context 时注入群聊上下文
+
+        与 AstrBot LTM 的关系:
+          - 这是一个完全独立的实现，不依赖 AstrBot 内置 LongTermMemory
+          - 当 keyword_capture_manage_context=True 时接管群聊上下文管理
+          - 在 on_llm_request 钩子中撤销 LTM 的上下文追加，避免重复
+        """
         try:
             if not self.enable_keyword_capture_reply:
                 return
 
-            # Ignore the bot's own messages to avoid responding to itself.
             if event.get_sender_id() == event.get_self_id():
                 return
 
@@ -435,23 +495,48 @@ class ToolboxPlugin(Star):
             if not message_text:
                 return
 
-            if not self.keyword_capture_words:
-                return
+            # 白名单检查
+            if self.keyword_capture_whitelist:
+                group_id = event.get_group_id()
+                in_whitelist = (
+                    event.unified_msg_origin in self.keyword_capture_whitelist
+                    or (group_id and group_id in self.keyword_capture_whitelist)
+                )
+                if not in_whitelist:
+                    return
 
-            if not any(word in message_text for word in self.keyword_capture_words):
-                return
+            # 判断触发类型：关键词命中 OR 基础概率
+            is_keyword_hit = bool(
+                self.keyword_capture_words
+                and any(word in message_text for word in self.keyword_capture_words)
+            )
+            if is_keyword_hit:
+                probability = self.keyword_capture_reply_probability
+            else:
+                # 非关键词模式仅群聊生效（私聊必须命中关键词）
+                if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                    return
+                probability = self.keyword_capture_base_probability
+                if probability <= 0.0:
+                    return
 
+            # 概率门限
             roll = random.random()
-            if roll > self.keyword_capture_reply_probability:
+            if roll > probability:
                 logger.debug(
-                    "[keyword_capture_reply] 关键词命中但未通过概率门限: "
-                    f"roll={roll:.4f}, p={self.keyword_capture_reply_probability:.4f}"
+                    f"[keyword_capture] 未通过概率门限: roll={roll:.4f}, "
+                    f"p={probability:.4f}, keyword_hit={is_keyword_hit}"
                 )
                 return
 
+            # 会话管理
             conv_mgr = self.context.conversation_manager
             curr_cid = await conv_mgr.get_curr_conversation_id(event.unified_msg_origin)
+
             if not curr_cid:
+                if self.keyword_capture_session_mode == "active_only":
+                    logger.debug("[keyword_capture] 无活跃会话且模式=active_only，跳过")
+                    return
                 curr_cid = await conv_mgr.new_conversation(
                     event.unified_msg_origin,
                     platform_id=event.get_platform_id(),
@@ -464,15 +549,47 @@ class ToolboxPlugin(Star):
                     curr_cid,
                 )
 
-            # 直接使用用户原消息作为 prompt，不做提示词注入/替换。
+            # 构建 prompt（注入群聊上下文，如果启用）
+            if self.keyword_capture_manage_context:
+                final_prompt = await self.kc_context.build_prompt(
+                    event,
+                    message_text,
+                    image_limit=self.keyword_capture_context_image_limit,
+                )
+            else:
+                final_prompt = message_text
+
+            # 标记此请求由 keyword_capture 触发（供 on_llm_request 识别）
+            event.set_extra("is_keyword_capture_request", True)
+
             yield event.request_llm(
-                prompt=message_text,
+                prompt=final_prompt,
                 session_id=curr_cid or "",
                 conversation=conversation,
             )
             event.stop_event()
         except Exception as e:
-            logger.debug(f"[keyword_capture_reply] 处理失败: {e}")
+            logger.debug(f"[keyword_capture] 处理失败: {e}")
+
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE,
+        priority=98,
+    )
+    async def kc_context_recorder(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ):
+        """
+        群聊上下文记录器。
+
+        独立于 keyword_capture_reply_handler 运行，无差别记录所有群聊消息。
+        仅在 keyword_capture_manage_context=True 时生效。
+        图片不在此处转述（触发回复时统一转述），仅存 URL。
+        """
+        if not self.enable_keyword_capture_reply:
+            return
+        if not self.keyword_capture_manage_context:
+            return
+        await self.kc_context.record_message(event)
 
     def _parse_blocked_targets(self, raw_value) -> list[str]:
         """解析配置中的禁用目标列表，支持 host/ip 的 list 或 JSON 字符串数组。"""
@@ -515,15 +632,32 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "location": {"type": "string", "description": "位置关键词，支持城市名、经纬度、LocationID、Adcode，必填。例如：杭州、116.41,39.92、101210101"},
-                        "number": {"type": "integer", "description": "返回候选数量，1-20，默认10"},
-                        "adm": {"type": "string", "description": "附加行政区过滤，可选"},
+                        "location": {
+                            "type": "string",
+                            "description": "位置关键词，支持城市名、经纬度、LocationID、Adcode，必填。例如：杭州、116.41,39.92、101210101",
+                        },
+                        "number": {
+                            "type": "integer",
+                            "description": "返回候选数量，1-20，默认10",
+                        },
+                        "adm": {
+                            "type": "string",
+                            "description": "附加行政区过滤，可选",
+                        },
                         "range": {"type": "string", "description": "搜索范围，可选"},
-                        "lang": {"type": "string", "description": "返回语言，默认zh"}
+                        "lang": {"type": "string", "description": "返回语言，默认zh"},
                     },
-                    "required": ["location"]
+                    "required": ["location"],
                 },
-                "keywords": ["天气", "城市编码", "location", "地理查询", "地区", "城市", "weather location"],
+                "keywords": [
+                    "天气",
+                    "城市编码",
+                    "location",
+                    "地理查询",
+                    "地区",
+                    "城市",
+                    "weather location",
+                ],
                 "handler": self._run_tool_weather_location,
             }
 
@@ -533,14 +667,33 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "location": {"type": "string", "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id，或者以英文逗号分隔的经度,纬度坐标如 116.41,39.92"},
-                        "query_type": {"type": "string", "description": "查询类型：now(实时)、3d(3日)、7d(7日)、indices_1d(今日生活指数)、indices_3d(3日生活指数)，默认now"},
-                        "full_7d": {"type": "boolean", "description": "仅在 query_type=7d 时生效。true 返回全量原始数据，false 返回精简总结（默认）"},
-                        "focus": {"type": "string", "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞"}
+                        "location": {
+                            "type": "string",
+                            "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id，或者以英文逗号分隔的经度,纬度坐标如 116.41,39.92",
+                        },
+                        "query_type": {
+                            "type": "string",
+                            "description": "查询类型：now(实时)、3d(3日)、7d(7日)、indices_1d(今日生活指数)、indices_3d(3日生活指数)，默认now",
+                        },
+                        "full_7d": {
+                            "type": "boolean",
+                            "description": "仅在 query_type=7d 时生效。true 返回全量原始数据，false 返回精简总结（默认）",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞",
+                        },
                     },
-                    "required": ["location"]
+                    "required": ["location"],
                 },
-                "keywords": ["天气", "实时天气", "天气预报", "生活指数", "7日天气", "weather"],
+                "keywords": [
+                    "天气",
+                    "实时天气",
+                    "天气预报",
+                    "生活指数",
+                    "7日天气",
+                    "weather",
+                ],
                 "handler": self._run_tool_weather,
             }
 
@@ -550,15 +703,40 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "location": {"type": "string", "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id"},
-                        "history_type": {"type": "string", "description": "历史类型：weather(历史天气，默认) 或 air(历史空气质量)"},
-                        "days": {"type": "integer", "description": "回溯天数，1-10，默认1"},
-                        "full_history": {"type": "boolean", "description": "true 返回全量历史数据，false 返回精简总结，>3d时默认返回精简总结"},
-                        "focus": {"type": "string", "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞"}
+                        "location": {
+                            "type": "string",
+                            "description": "Location ID，必填。建议来自 tool_weather_location 返回的 id",
+                        },
+                        "history_type": {
+                            "type": "string",
+                            "description": "历史类型：weather(历史天气，默认) 或 air(历史空气质量)",
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "回溯天数，1-10，默认1",
+                        },
+                        "full_history": {
+                            "type": "boolean",
+                            "description": "true 返回全量历史数据，false 返回精简总结，>3d时默认返回精简总结",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "description": "可选。总结关注点，例如：穿衣建议、是否需要带伞",
+                        },
                     },
-                    "required": ["location"]
+                    "required": ["location"],
                 },
-                "keywords": ["历史天气", "空气质量", "history", "weather history", "AQI", "历史空气", "天气","历史","历史记录"],
+                "keywords": [
+                    "历史天气",
+                    "空气质量",
+                    "history",
+                    "weather history",
+                    "AQI",
+                    "历史空气",
+                    "天气",
+                    "历史",
+                    "历史记录",
+                ],
                 "handler": self._run_tool_weather_history,
             }
 
@@ -570,14 +748,34 @@ class ToolboxPlugin(Star):
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "搜索关键词，必填"},
-                        "engine": {"type": "string", "description": "搜索引擎：search_std(默认) 或 search_pro_quark(复杂问题/强时效)"},
-                        "content_size": {"type": "string", "description": "内容粒度：lite(摘要)、medium(摘要+来源信息)、high(摘要+来源全文)；默认lite"},
-                        "time_filter": {"type": "string", "description": "时间过滤：noLimit、oneDay、oneWeek、oneMonth、oneYear"},
-                        "count": {"type": "integer", "description": "结果数量，1-20，默认10"}
+                        "engine": {
+                            "type": "string",
+                            "description": "搜索引擎：search_std(默认) 或 search_pro_quark(复杂问题/强时效)",
+                        },
+                        "content_size": {
+                            "type": "string",
+                            "description": "内容粒度：lite(摘要)、medium(摘要+来源信息)、high(摘要+来源全文)；默认lite",
+                        },
+                        "time_filter": {
+                            "type": "string",
+                            "description": "时间过滤：noLimit、oneDay、oneWeek、oneMonth、oneYear",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "结果数量，1-20，默认10",
+                        },
                     },
-                    "required": ["query"]
+                    "required": ["query"],
                 },
-                "keywords": ["搜索", "联网", "查资料", "网页搜索", "search", "web","网页"],
+                "keywords": [
+                    "搜索",
+                    "联网",
+                    "查资料",
+                    "网页搜索",
+                    "search",
+                    "web",
+                    "网页",
+                ],
                 "handler": self._run_tool_search,
             }
 
@@ -588,15 +786,21 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "网页URL，必须以 http:// 或 https:// 开头"},
-                        "skip_filter": {"type": "boolean", "description": "开关：false(默认)=增强抓取逻辑；true=原版逻辑。"},
+                        "url": {
+                            "type": "string",
+                            "description": "网页URL，必须以 http:// 或 https:// 开头",
+                        },
+                        "skip_filter": {
+                            "type": "boolean",
+                            "description": "开关：false(默认)=增强抓取逻辑；true=原版逻辑。",
+                        },
                         "llm_compress": {
                             "type": "string",
                             "enum": ["inherit", "summary", "truncate"],
-                            "description": "可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。"
-                        }
+                            "description": "可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。",
+                        },
                     },
-                    "required": ["url"]
+                    "required": ["url"],
                 },
                 "keywords": ["搜索", "抓取网页", "网页正文", "url", "fetch", "extract"],
                 "handler": self._run_tool_fetch_url,
@@ -609,15 +813,40 @@ class ToolboxPlugin(Star):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "mode": {"type": "string", "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断"},
-                        "target_id": {"type": "string", "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全"},
-                        "page": {"type": "integer", "description": "本地分页页码，默认1"},
-                        "refresh": {"type": "boolean", "description": "是否强制刷新历史缓存。true 时忽略旧缓存，从最新数据重新拉取"},
-                        "count": {"type": "integer", "description": "每页返回数量（page_size），默认20，范围1-100"}
+                        "mode": {
+                            "type": "string",
+                            "description": "查询模式：group(群聊) 或 friend(私聊)。不传时按上下文自动推断",
+                        },
+                        "target_id": {
+                            "type": "string",
+                            "description": "目标ID：group 模式传群号，friend 模式传用户QQ号。可不传并按当前上下文自动补全",
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "本地分页页码，默认1",
+                        },
+                        "refresh": {
+                            "type": "boolean",
+                            "description": "是否强制刷新历史缓存。true 时忽略旧缓存，从最新数据重新拉取",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "每页返回数量（page_size），默认20，范围1-100",
+                        },
                     },
-                    "required": []
+                    "required": [],
                 },
-                "keywords": ["聊天", "消息", "历史记录", "历史消息", "聊天记录", "群历史", "私聊历史", "history", "message log"],
+                "keywords": [
+                    "聊天",
+                    "消息",
+                    "历史记录",
+                    "历史消息",
+                    "聊天记录",
+                    "群历史",
+                    "私聊历史",
+                    "history",
+                    "message log",
+                ],
                 "handler": self._run_tool_history,
             }
 
@@ -628,9 +857,18 @@ class ToolboxPlugin(Star):
                 "type": "object",
                 "properties": {
                     "content": {"type": "string", "description": "记忆内容，必填"},
-                    "tags": {"type": "string", "description": "标签，多个标签用英文逗号分隔，可选"},
-                    "importance": {"type": "integer", "description": "重要程度，1-10，默认5"},
-                    "user_id": {"type": "string", "description": "可选，指定记忆所属用户，默认当前会话发送者"},
+                    "tags": {
+                        "type": "string",
+                        "description": "标签，多个标签用英文逗号分隔，可选",
+                    },
+                    "importance": {
+                        "type": "integer",
+                        "description": "重要程度，1-10，默认5",
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "可选，指定记忆所属用户，默认当前会话发送者",
+                    },
                 },
                 "required": ["content"],
             },
@@ -645,13 +883,29 @@ class ToolboxPlugin(Star):
                 "type": "object",
                 "properties": {
                     "keyword": {"type": "string", "description": "搜索关键词，可选"},
-                    "user_specific": {"type": "boolean", "description": "是否仅搜索当前用户，默认true"},
-                    "limit": {"type": "integer", "description": "返回数量，默认10，最大20"},
-                    "user_id": {"type": "string", "description": "可选，强制指定查询用户"},
+                    "user_specific": {
+                        "type": "boolean",
+                        "description": "是否仅搜索当前用户，默认true",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回数量，默认10，最大20",
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "可选，强制指定查询用户",
+                    },
                 },
                 "required": [],
             },
-            "keywords": ["记忆", "搜索记忆", "查找记忆", "记忆列表", "recall", "memory"],
+            "keywords": [
+                "记忆",
+                "搜索记忆",
+                "查找记忆",
+                "记忆列表",
+                "recall",
+                "memory",
+            ],
             "handler": self._run_tool_search_memories,
         }
 
@@ -664,7 +918,10 @@ class ToolboxPlugin(Star):
                     "memory_id": {"type": "string", "description": "记忆ID，必填"},
                     "content": {"type": "string", "description": "新内容，可选"},
                     "tags": {"type": "string", "description": "新标签，逗号分隔，可选"},
-                    "importance": {"type": "integer", "description": "新重要度，1-10，可选"},
+                    "importance": {
+                        "type": "integer",
+                        "description": "新重要度，1-10，可选",
+                    },
                 },
                 "required": ["memory_id"],
             },
@@ -707,8 +964,14 @@ class ToolboxPlugin(Star):
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "查询文本，必填"},
-                    "top_k": {"type": "integer", "description": "返回条数，默认5，最大50"},
-                    "collection_name": {"type": "string", "description": "集合名，可选，覆盖配置中的 collection_name"},
+                    "top_k": {
+                        "type": "integer",
+                        "description": "返回条数，默认5，最大50",
+                    },
+                    "collection_name": {
+                        "type": "string",
+                        "description": "集合名，可选，覆盖配置中的 collection_name",
+                    },
                 },
                 "required": ["query"],
             },
@@ -739,7 +1002,10 @@ class ToolboxPlugin(Star):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "collection_name": {"type": "string", "description": "集合名，可选"},
+                    "collection_name": {
+                        "type": "string",
+                        "description": "集合名，可选",
+                    },
                     "limit": {"type": "integer", "description": "返回条数，默认5"},
                 },
                 "required": [],
@@ -768,9 +1034,15 @@ class ToolboxPlugin(Star):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "memory_id": {"type": "string", "description": "记录ID(memory_id)，必填"},
+                    "memory_id": {
+                        "type": "string",
+                        "description": "记录ID(memory_id)，必填",
+                    },
                     "session_id": {"type": "string", "description": "会话ID，可选"},
-                    "confirm": {"type": "string", "description": "确认参数，可选（由 Mnemosyne 定义）"},
+                    "confirm": {
+                        "type": "string",
+                        "description": "确认参数，可选（由 Mnemosyne 定义）",
+                    },
                 },
                 "required": ["memory_id"],
             },
@@ -784,9 +1056,15 @@ class ToolboxPlugin(Star):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_id": {"type": "string", "description": "目标QQ号或群号，必填"},
+                    "target_id": {
+                        "type": "string",
+                        "description": "目标QQ号或群号，必填",
+                    },
                     "message": {"type": "string", "description": "消息内容，必填"},
-                    "chat_type": {"type": "string", "description": "聊天类型：group/private/auto，默认auto"},
+                    "chat_type": {
+                        "type": "string",
+                        "description": "聊天类型：group/private/auto，默认auto",
+                    },
                 },
                 "required": ["target_id", "message"],
             },
@@ -899,7 +1177,9 @@ class ToolboxPlugin(Star):
             "authentication": {
                 "token": str(self.mnemosyne_authentication.get("token", "") or ""),
                 "user": str(self.mnemosyne_authentication.get("user", "") or ""),
-                "password": str(self.mnemosyne_authentication.get("password", "") or ""),
+                "password": str(
+                    self.mnemosyne_authentication.get("password", "") or ""
+                ),
             },
         }
 
@@ -910,7 +1190,9 @@ class ToolboxPlugin(Star):
                 continue
             if isinstance(v, str) and v.strip() == "":
                 continue
-            if isinstance(v, dict) and not any(str(x or "").strip() for x in v.values()):
+            if isinstance(v, dict) and not any(
+                str(x or "").strip() for x in v.values()
+            ):
                 continue
             if isinstance(v, list) and len(v) == 0:
                 continue
@@ -927,7 +1209,9 @@ class ToolboxPlugin(Star):
             return
 
         try:
-            if hasattr(mnemo_plugin, "config") and isinstance(mnemo_plugin.config, dict):
+            if hasattr(mnemo_plugin, "config") and isinstance(
+                mnemo_plugin.config, dict
+            ):
                 mnemo_plugin.config.update(cfg)
             else:
                 setattr(mnemo_plugin, "config", dict(cfg))
@@ -941,11 +1225,15 @@ class ToolboxPlugin(Star):
             except Exception:
                 continue
 
-    async def _forward_to_mnemosyne(self, event: AstrMessageEvent, fn_name: str, **kwargs):
+    async def _forward_to_mnemosyne(
+        self, event: AstrMessageEvent, fn_name: str, **kwargs
+    ):
         mnemo_plugin = self._get_mnemosyne_plugin_instance()
         if not mnemo_plugin:
             await event.send(
-                MessageChain().message("未找到 Mnemosyne 插件实例，无法转发记忆相关操作")
+                MessageChain().message(
+                    "未找到 Mnemosyne 插件实例，无法转发记忆相关操作"
+                )
             )
             return
 
@@ -974,7 +1262,11 @@ class ToolboxPlugin(Star):
             await event.send(MessageChain().message(f"转发 Mnemosyne 失败：{e}"))
 
     def _get_mnemosyne_auth_params(self) -> dict:
-        auth = self.mnemosyne_authentication if isinstance(self.mnemosyne_authentication, dict) else {}
+        auth = (
+            self.mnemosyne_authentication
+            if isinstance(self.mnemosyne_authentication, dict)
+            else {}
+        )
         token = str(auth.get("token", "") or "").strip()
         user = str(auth.get("user", "") or "").strip()
         password = str(auth.get("password", "") or "").strip()
@@ -994,7 +1286,10 @@ class ToolboxPlugin(Star):
 
         # Milvus Lite 优先
         if self.mnemosyne_milvus_lite_path:
-            return alias, {"uri": self.mnemosyne_milvus_lite_path, **self._get_mnemosyne_auth_params()}
+            return alias, {
+                "uri": self.mnemosyne_milvus_lite_path,
+                **self._get_mnemosyne_auth_params(),
+            }
 
         addr = (self.mnemosyne_address or "").strip()
         if not addr:
@@ -1035,9 +1330,13 @@ class ToolboxPlugin(Star):
         if not query.strip():
             return []
 
-        effective_collection_name = (collection_name or "").strip() or self.mnemosyne_collection_name
+        effective_collection_name = (
+            collection_name or ""
+        ).strip() or self.mnemosyne_collection_name
         if not effective_collection_name:
-            raise RuntimeError("缺少 collection_name：请在工具参数传入 collection_name，或在配置中设置 mnemosyne.collection_name")
+            raise RuntimeError(
+                "缺少 collection_name：请在工具参数传入 collection_name，或在配置中设置 mnemosyne.collection_name"
+            )
 
         provider = None
         provider_id = (self.mnemosyne_embedding_provider_id or "").strip()
@@ -1064,7 +1363,9 @@ class ToolboxPlugin(Star):
 
         alias, connect_kwargs = self._parse_milvus_connect_kwargs()
         if not alias:
-            raise RuntimeError("缺少 Milvus 连接配置：请填写 address 或 milvus_lite_path")
+            raise RuntimeError(
+                "缺少 Milvus 连接配置：请填写 address 或 milvus_lite_path"
+            )
 
         # 幂等连接：重复 connect 同 alias 会覆盖/复用
         connections.connect(alias=alias, **connect_kwargs)
@@ -1111,7 +1412,9 @@ class ToolboxPlugin(Star):
                 )
         return formatted
 
-    async def _forward_search_to_wyc(self, event: AstrMessageEvent, query: str) -> dict | None:
+    async def _forward_search_to_wyc(
+        self, event: AstrMessageEvent, query: str
+    ) -> dict | None:
         wyc_plugin = self._get_wyc_plugin_instance()
         if not wyc_plugin:
             return None
@@ -1126,7 +1429,9 @@ class ToolboxPlugin(Star):
             logger.error(f"[search_koko_tools] 转发 search_wyc_tools 失败: {e}")
         return None
 
-    async def _forward_run_to_wyc(self, event: AstrMessageEvent, tool_name: str, args_dict: dict) -> dict | None:
+    async def _forward_run_to_wyc(
+        self, event: AstrMessageEvent, tool_name: str, args_dict: dict
+    ) -> dict | None:
         wyc_plugin = self._get_wyc_plugin_instance()
         if not wyc_plugin:
             return None
@@ -1145,13 +1450,17 @@ class ToolboxPlugin(Star):
             logger.error(f"[run_koko_tool] 转发 run_wyc_tool 失败: {e}")
         return None
 
-    async def _run_tool_weather_location(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_weather_location(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_weather_location(self, args)
 
     async def _run_tool_weather(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_weather(self, args)
 
-    async def _run_tool_weather_history(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_weather_history(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_weather_history(self, args)
 
     async def _run_tool_search(self, event: AstrMessageEvent, args: dict) -> str:
@@ -1166,22 +1475,34 @@ class ToolboxPlugin(Star):
     async def _run_tool_add_memory(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_add_memory(self, event, args)
 
-    async def _run_tool_search_memories(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_search_memories(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_search_memories(self, event, args)
 
-    async def _run_tool_search_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_search_memory_vector(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_search_memory_vector(self, event, args)
 
-    async def _run_tool_list_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_list_memory_vector(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_list_memory_vector(self, event, args)
 
-    async def _run_tool_list_records_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_list_records_memory_vector(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_list_records_memory_vector(self, event, args)
 
-    async def _run_tool_remember_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_remember_memory_vector(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_remember_memory_vector(self, event, args)
 
-    async def _run_tool_delete_record_memory_vector(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_delete_record_memory_vector(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_delete_record_memory_vector(self, event, args)
 
     async def _run_tool_update_memory(self, event: AstrMessageEvent, args: dict) -> str:
@@ -1190,7 +1511,9 @@ class ToolboxPlugin(Star):
     async def _run_tool_delete_memory(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_delete_memory(self, event, args)
 
-    async def _run_tool_get_memory_detail(self, event: AstrMessageEvent, args: dict) -> str:
+    async def _run_tool_get_memory_detail(
+        self, event: AstrMessageEvent, args: dict
+    ) -> str:
         return await run_get_memory_detail(self, event, args)
 
     async def _run_tool_send_message(self, event: AstrMessageEvent, args: dict) -> str:
@@ -1214,7 +1537,9 @@ class ToolboxPlugin(Star):
     async def _update_contacts_cache(self, client: Any) -> None:
         async with self._cache_lock:
             now = datetime.now().timestamp()
-            if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
+            if now - self._cache_time < self._cache_expire and (
+                self._groups_cache or self._friends_cache
+            ):
                 return
 
             try:
@@ -1241,7 +1566,9 @@ class ToolboxPlugin(Star):
 
             self._cache_time = now
 
-    async def _collect_forwarded_output_text(self, event: AstrMessageEvent, fn_name: str, **kwargs) -> str:
+    async def _collect_forwarded_output_text(
+        self, event: AstrMessageEvent, fn_name: str, **kwargs
+    ) -> str:
         parts: list[str] = []
         async for item in self._forward_to_mnemosyne(event, fn_name, **(kwargs or {})):
             text = self._extract_llm_text(item)
@@ -1253,7 +1580,6 @@ class ToolboxPlugin(Star):
             if text:
                 parts.append(text)
         return "\n".join(parts).strip()
-
 
     # ---------------- 工具暴露 ----------------
     @filter.llm_tool(name="search_koko_tools")
@@ -1315,7 +1641,9 @@ class ToolboxPlugin(Star):
                     wyc_message = str(wyc_result.get("message", "") or "").strip()
                     if wyc_message:
                         wyc_messages.append(f"【{query_word}】\n{wyc_message}")
-                    wyc_results.append({"keyword": query_word, "wyc_result": wyc_result})
+                    wyc_results.append(
+                        {"keyword": query_word, "wyc_result": wyc_result}
+                    )
 
         local_matched = list(local_matched_by_name.values())
 
@@ -1329,7 +1657,9 @@ class ToolboxPlugin(Star):
         if local_matched:
             lines.append(f"🔍 (koko) 找到 {len(local_matched)} 个相关工具：")
             for tool in local_matched[:10]:
-                lines.append(f"- {tool['name']}: {str(tool.get('description', '') or '')[:60]}...")
+                lines.append(
+                    f"- {tool['name']}: {str(tool.get('description', '') or '')[:60]}..."
+                )
 
         if wyc_messages:
             if lines:
@@ -1351,13 +1681,19 @@ class ToolboxPlugin(Star):
         """返回当前可用工具列表（名称 + 描述 + 参数要点）。仅当 search_koko_tools 未找到时使用。"""
         available_tools = self._get_available_tools()
         if not available_tools:
-            return {"status": "success", "message": "当前配置下没有启用任何工具。", "tool_names": []}
+            return {
+                "status": "success",
+                "message": "当前配置下没有启用任何工具。",
+                "tool_names": [],
+            }
 
         tools_list = []
         for name, meta in available_tools.items():
             params = meta.get("parameters", {})
             required = params.get("required", []) if isinstance(params, dict) else []
-            properties = params.get("properties", {}) if isinstance(params, dict) else {}
+            properties = (
+                params.get("properties", {}) if isinstance(params, dict) else {}
+            )
             required_text = "无"
             if required:
                 required_text = ", ".join(str(r) for r in required)
@@ -1370,7 +1706,11 @@ class ToolboxPlugin(Star):
             )
 
         msg = "📦 可用工具列表：\n" + "\n".join(tools_list)
-        return {"status": "success", "message": msg, "tool_names": list(available_tools.keys())}
+        return {
+            "status": "success",
+            "message": msg,
+            "tool_names": list(available_tools.keys()),
+        }
 
     @llm_tool("run_koko_tool")
     async def run_koko_tool(
@@ -1383,7 +1723,7 @@ class ToolboxPlugin(Star):
     ) -> dict:
         """
         执行指定工具。调用顺序建议：先 search_koko_tools，再在必要时 call_koko_tools，最后 run_koko_tool。
-        
+
         Args:
             tool_name(string): 要执行的工具名称，必填
             tool_args(string): 工具参数 JSON 字符串，可选。例如 '{"query": "杭州天气"}'
@@ -1408,9 +1748,15 @@ class ToolboxPlugin(Star):
                 if isinstance(parsed_args, dict):
                     args_dict = parsed_args
                 else:
-                    return {"status": "error", "message": "tool_args 必须是 JSON 对象字符串。"}
+                    return {
+                        "status": "error",
+                        "message": "tool_args 必须是 JSON 对象字符串。",
+                    }
             except json.JSONDecodeError:
-                return {"status": "error", "message": "参数格式错误，tool_args 必须是有效 JSON 字符串。"}
+                return {
+                    "status": "error",
+                    "message": "参数格式错误，tool_args 必须是有效 JSON 字符串。",
+                }
 
         # 兼容调用：允许通过 run_koko_tool 转发执行工具搜索/列表接口。
         if normalized_name == "search_koko_tools":
@@ -1422,7 +1768,9 @@ class ToolboxPlugin(Star):
 
         available_tools = self._get_available_tools()
         if normalized_name not in available_tools:
-            wyc_result = await self._forward_run_to_wyc(event, normalized_name, args_dict)
+            wyc_result = await self._forward_run_to_wyc(
+                event, normalized_name, args_dict
+            )
             if isinstance(wyc_result, dict):
                 wyc_status = str(wyc_result.get("status", "success") or "success")
                 if wyc_status.lower() != "error":
@@ -1478,17 +1826,31 @@ class ToolboxPlugin(Star):
         )
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
+    async def on_llm_request(
+        self, event: AstrMessageEvent, request: Any, *args, **kwargs
+    ) -> None:
         try:
+            # ---- 撤销 AstrBot LTM 追加的群聊上下文（避免重复） ----
+            if event.get_extra("is_keyword_capture_request"):
+                ltm_marker = (
+                    "You are now in a chatroom. The chat history is as follows:"
+                )
+                if (
+                    hasattr(request, "system_prompt")
+                    and ltm_marker in request.system_prompt
+                ):
+                    idx = request.system_prompt.find(ltm_marker)
+                    request.system_prompt = request.system_prompt[:idx].rstrip()
+
             guide_text = (
                 "[重要工具使用规范] 当你需要调用本能力时，必须遵循以下顺序：\n"
                 "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取、记忆、发消息）。\n"
                 "2. 若 search_koko_tools 没找到，再调用 call_koko_tools 查看完整可用工具列表和参数要点。\n"
-                #"2.5. 若所需工具不在列表中，且更换关键词后仍然无果，则尝试使用 search_wyc_tools 重复上述2步。"
+                # "2.5. 若所需工具不在列表中，且更换关键词后仍然无果，则尝试使用 search_wyc_tools 重复上述2步。"
                 "3. 确认工具名后，调用 run_koko_tool，并使用 tool_name + tool_args(JSON字符串)。\n"
                 "禁止跳过搜索直接猜测工具名。"
             )
-            #guide_text = () # 故意的，别删
+            # guide_text = () # 故意的，别删
 
             if hasattr(request, "system_prompt") and request.system_prompt:
                 if guide_text not in request.system_prompt:
@@ -1533,15 +1895,41 @@ class ToolboxPlugin(Star):
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
+        """LLM 响应后，记录 AI 回复到群聊上下文缓冲区。"""
+        try:
+            if not event.get_extra("is_keyword_capture_request"):
+                return
+            if not self.keyword_capture_manage_context:
+                return
+            reply_text = ""
+            if hasattr(response, "completion_text") and response.completion_text:
+                reply_text = response.completion_text
+            elif hasattr(response, "result_chain") and response.result_chain:
+                chain = getattr(response.result_chain, "chain", None)
+                if isinstance(chain, list):
+                    parts = []
+                    for comp in chain:
+                        text = getattr(comp, "text", None)
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text)
+                    reply_text = "\n".join(parts)
+            if reply_text:
+                await self.kc_context.record_reply(event, reply_text)
+        except Exception as e:
+            logger.debug(f"[on_llm_response] 记录回复失败: {e}")
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")
     async def admin_tool_memory(self, event: AstrMessageEvent):
         if not self.enable_admin_tool_memory_command:
-            await event.send(MessageChain().message("管理员命令 /tool_memory 已被配置禁用"))
+            await event.send(
+                MessageChain().message("管理员命令 /tool_memory 已被配置禁用")
+            )
             return
 
-
-# ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
+    # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
     @filter.llm_tool(name="search_memory_vector")
     async def search_memory_vector(
         self,
@@ -1584,7 +1972,9 @@ class ToolboxPlugin(Star):
     async def list_memory_vector(self, event: AstrMessageEvent) -> dict:
         """列出 Mnemosyne 中所有集合（供 LLM 内部调用）。"""
         try:
-            text = await self._collect_forwarded_output_text(event, "list_collections_cmd")
+            text = await self._collect_forwarded_output_text(
+                event, "list_collections_cmd"
+            )
             return {"status": "success", "message": text}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -1608,12 +1998,19 @@ class ToolboxPlugin(Star):
                 collection_name=collection_name,
                 limit=limit,
             )
-            return {"status": "success", "message": text, "collection_name": collection_name, "limit": limit}
+            return {
+                "status": "success",
+                "message": text,
+                "collection_name": collection_name,
+                "limit": limit,
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
     @filter.llm_tool(name="remember_memory_vector")
-    async def remember_memory_vector(self, event: AstrMessageEvent, content: str) -> dict:
+    async def remember_memory_vector(
+        self, event: AstrMessageEvent, content: str
+    ) -> dict:
         """写入记忆到 Mnemosyne（供 LLM 内部调用）。
 
         Args:
@@ -1623,7 +2020,9 @@ class ToolboxPlugin(Star):
         if not content:
             return {"status": "error", "message": "缺少 content 参数"}
         try:
-            text = await self._collect_forwarded_output_text(event, "remember_cmd", content=content)
+            text = await self._collect_forwarded_output_text(
+                event, "remember_cmd", content=content
+            )
             return {"status": "success", "message": text}
         except Exception as e:
             return {"status": "error", "message": str(e)}

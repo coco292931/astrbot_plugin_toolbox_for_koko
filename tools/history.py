@@ -257,7 +257,9 @@ async def handle_history(plugin, event, args: dict) -> str:
             return "暂无历史消息记录"
 
         title = (
-            f"群 {target_id} 历史消息" if mode == "group" else f"好友 {target_id} 历史消息"
+            f"群 {target_id} 历史消息"
+            if mode == "group"
+            else f"好友 {target_id} 历史消息"
         )
         if refresh:
             title += "（已刷新缓存）"

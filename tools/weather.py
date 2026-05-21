@@ -13,7 +13,6 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 import aiohttp
-from astrbot.api import logger
 
 
 async def handle_weather_location(plugin, args: dict) -> str:
@@ -51,8 +50,10 @@ async def handle_weather_location(plugin, args: dict) -> str:
     if use_query_key:
         query_pairs.append(("key", plugin.qweather_key))
 
-    host = plugin._get_geo_host(use_query_key).replace("https://", "").replace(
-        "http://", ""
+    host = (
+        plugin._get_geo_host(use_query_key)
+        .replace("https://", "")
+        .replace("http://", "")
     )
     url = f"https://{host}/geo/v2/city/lookup?{urllib.parse.urlencode(query_pairs)}"
 
@@ -125,8 +126,10 @@ async def handle_weather(plugin, args: dict) -> str:
     unit = args.get("unit", "m")
 
     headers, use_query_key = plugin._build_qweather_auth()
-    host = plugin._get_weather_host(use_query_key).replace("https://", "").replace(
-        "http://", ""
+    host = (
+        plugin._get_weather_host(use_query_key)
+        .replace("https://", "")
+        .replace("http://", "")
     )
 
     is_indices = api_suffix.startswith("indices/")
@@ -134,7 +137,6 @@ async def handle_weather(plugin, args: dict) -> str:
     results: dict = {"code": "200", "location": str(location_id)}
 
     async with aiohttp.ClientSession() as session:
-
         # --- 实时天气（query_type 为 now/3d/7d 时获取）---
         if not is_indices:
             now_pairs: list[tuple[str, str]] = [
@@ -145,7 +147,9 @@ async def handle_weather(plugin, args: dict) -> str:
             if use_query_key:
                 now_pairs.append(("key", plugin.qweather_key))
 
-            now_url = f"https://{host}/v7/weather/now?{urllib.parse.urlencode(now_pairs)}"
+            now_url = (
+                f"https://{host}/v7/weather/now?{urllib.parse.urlencode(now_pairs)}"
+            )
             async with session.get(now_url, headers=headers) as resp_now:
                 now_data = await resp_now.json(content_type=None)
             if not isinstance(now_data, dict) or now_data.get("code") != "200":
@@ -168,11 +172,15 @@ async def handle_weather(plugin, args: dict) -> str:
 
         # indices API 路径为 /v7/indices/... 而非 /v7/weather/...
         api_version_path = f"v7/{api_suffix}"
-        query_url = f"https://{host}/{api_version_path}?{urllib.parse.urlencode(query_pairs)}"
+        query_url = (
+            f"https://{host}/{api_version_path}?{urllib.parse.urlencode(query_pairs)}"
+        )
         async with session.get(query_url, headers=headers) as resp:
             query_data = await resp.json(content_type=None)
         if not isinstance(query_data, dict) or query_data.get("code") != "200":
-            return f"{query_type_raw}查询失败，错误码: {query_data.get('code', 'unknown')}"
+            return (
+                f"{query_type_raw}查询失败，错误码: {query_data.get('code', 'unknown')}"
+            )
 
         if is_indices:
             results["daily"] = query_data.get("daily", [])
@@ -211,8 +219,10 @@ async def handle_weather_history(plugin, args: dict) -> str:
 
     def _build_url(date_str: str) -> str:
         if history_type == "air":
-            host = plugin._get_air_host(use_query_key).replace("https://", "").replace(
-                "http://", ""
+            host = (
+                plugin._get_air_host(use_query_key)
+                .replace("https://", "")
+                .replace("http://", "")
             )
             pairs: list[tuple[str, str]] = [
                 ("location", str(location_id)),
@@ -223,8 +233,10 @@ async def handle_weather_history(plugin, args: dict) -> str:
                 pairs.append(("key", plugin.qweather_key))
             return f"https://{host}/v7/historical/air?{urllib.parse.urlencode(pairs)}"
 
-        host = plugin._get_weather_host(use_query_key).replace("https://", "").replace(
-            "http://", ""
+        host = (
+            plugin._get_weather_host(use_query_key)
+            .replace("https://", "")
+            .replace("http://", "")
         )
         pairs = [
             ("location", str(location_id)),
@@ -251,13 +263,20 @@ async def handle_weather_history(plugin, args: dict) -> str:
                     data = await resp.json(content_type=None)
                     if not isinstance(data, dict) or data.get("code") != "200":
                         historical_list.append(
-                            {"date": date_str, "code": getattr(data, "get", lambda _k: None)("code")}
+                            {
+                                "date": date_str,
+                                "code": getattr(data, "get", lambda _k: None)("code"),
+                            }
                         )
                         continue
 
                     if history_type == "air":
                         historical_list.append(
-                            {"date": date_str, "air": data.get("air", {}), "refer": data.get("refer", {})}
+                            {
+                                "date": date_str,
+                                "air": data.get("air", {}),
+                                "refer": data.get("refer", {}),
+                            }
                         )
                     else:
                         historical_list.append(

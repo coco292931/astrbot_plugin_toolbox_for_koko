@@ -22,7 +22,7 @@
 
 从 v1.0.0 开始，项目完成了模块化架构重构，结构如下：
 
-```
+```text
 astrbot_plugin_toolbox_for_koko/
 ├── main.py                   # 插件入口，配置加载、工具注册表、LLM 工具暴露
 ├── metadata.yaml             # 插件元数据
@@ -47,13 +47,6 @@ astrbot_plugin_toolbox_for_koko/
 ├── _conf_schema_config.json  # 配置项默认值
 ├── requirements.txt          # 项目依赖
 ├── CHANGELOG.md              # 更新日志
-└── tools_debug/              # 开发调试辅助脚本（仅开发用）
-    ├── check_dead_handles.py
-    ├── find_dead_methods.py
-    ├── find_methods.py
-    ├── find_handle_bounds.py
-    ├── find_qweather_dead.py
-    └── find_qweather_ranges.py
 ```
 
 ## ⚙️ 核心前置配置
