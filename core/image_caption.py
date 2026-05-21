@@ -1,20 +1,19 @@
 """
-图片转述前处理器 (ImageCaptionHandler)
+图片转述后处理器 (ImageCaptionHandler)
 
-在 on_llm_request 钩子中主动接管图片转述，不让 AstrBot 处理图片，
-从而规避其概率性吞图片的 bug。
+在 on_llm_request 钩子中检测 AstrBot 图片转述失败，从原始消息重新
+提取图片进行降级转述。
 
 流程:
-  1. 检测 req.image_urls 有内容
-  2. 立即清空 req.image_urls，阻止 AstrBot 处理
-  3. 从 event.get_messages() 获取图片 URL + sub_type（0=普通图片，1=表情包）
-  4. 自行调用 Provider 转述（支持自定义提示词模板，可用 {image_type} 占位符）
-  5. 失败时降级：下载 → PIL GIF 取帧 → 本地路径重试
-  6. 以 [表情包: 描述] 或 [图片: 描述] 追加到 extra_user_content_parts
+  1. 检测 extra_user_content_parts 中有 [Image Captioning Failed]
+  2. 从 event.get_messages() 重新提取图片 URL + sub_type
+  3. 先尝试 URL 直传转述
+  4. 失败时降级：下载 → 压缩 → PIL GIF 取帧 → 本地路径重试
+  5. 替换失败标记为 [表情包: 描述] 或 [图片: 描述]
 
-可配置项:
-  - image_caption_hook_enabled: 总开关
-  - image_caption_prompt_template: 自定义提示词模板
+与群聊上下文的关系:
+  - 不影响 kc_context._transcribe_images（群聊上下文中的图片转述）
+  - image_caption_hook_enabled 关闭时完全跳过
 
 维护说明:
   - 图片 URL 从 event.get_messages() 提取，顺序与用户发送一致
@@ -31,12 +30,11 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image as MsgImage
-from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.media_utils import compress_image
 
 
 class ImageCaptionHandler:
-    """图片转述前处理器。"""
+    """图片转述后处理器。"""
 
     # 默认提示词模板
     DEFAULT_PROMPT_TEMPLATE = "Please describe the {image_type} using Chinese."
@@ -59,39 +57,47 @@ class ImageCaptionHandler:
             return True, 1280, 95
 
     async def process(self, event: AstrMessageEvent, request: Any) -> None:
-        """处理图片转述。检测 req.image_urls 有内容时接管。"""
-        if not hasattr(request, "image_urls") or not request.image_urls:
-            return
-
+        """后处理：检测图片转述失败，从原始消息重新提取并降级。"""
         if not self.plugin.image_caption_hook_enabled:
             return
 
-        image_urls = list(request.image_urls)
-        request.image_urls = []  # 清空，防止 AstrBot 处理
+        # 检测 AstrBot 图片转述失败的标记
+        has_failure = False
+        if hasattr(request, "extra_user_content_parts"):
+            for part in request.extra_user_content_parts:
+                if hasattr(part, "text") and "[Image Captioning Failed]" in str(
+                    part.text
+                ):
+                    has_failure = True
+                    break
 
-        # 从原始消息获取图片类型（保持顺序）
-        image_types: list[str] = []
+        if not has_failure:
+            return
+
+        # 从原始消息提取图片 URL 和类型
+        image_infos: list[tuple[str, str]] = []
         for comp in event.get_messages():
             if isinstance(comp, MsgImage):
-                sub_type = getattr(comp, "sub_type", None)
-                # OneBot 中 sub_type: 0=普通图片, 1=表情包/动画表情
-                image_types.append("表情包" if sub_type == 1 else "图片")
-            else:
-                # 非 Image 组件插入 None 占位，保持索引对齐
-                image_types.append(None)  # type: ignore[arg-type]
+                url = comp.url if comp.url else comp.file
+                if url:
+                    # sub_type 保留供后续扩展，当前一律按 GIF 处理
+                    # sub_type = getattr(comp, "sub_type", None)
+                    image_infos.append((url, "GIF"))
 
-        # 只保留 Image 对应的类型
-        img_only_types = [t for t in image_types if t is not None]
+        if not image_infos:
+            return
+
+        logger.info(
+            f"[ImageCaption] 检测到图片转述失败，尝试降级处理 {len(image_infos)} 张图片"
+        )
 
         provider = self.plugin.context.get_using_provider()
         if not provider:
-            logger.warning("[ImageCaption] 未找到可用 Provider，跳过图片转述")
+            logger.warning("[ImageCaption] 未找到可用 Provider，跳过降级")
             return
 
-        for idx, img_url in enumerate(image_urls):
-            img_type = img_only_types[idx] if idx < len(img_only_types) else "图片"
-
-            # 构建提示词（支持自定义模板）
+        for img_url, img_type in image_infos:
+            # 构建提示词
             prompt_template = self.plugin.image_caption_prompt_template
             if not prompt_template:
                 prompt_template = self.DEFAULT_PROMPT_TEMPLATE
@@ -106,8 +112,14 @@ class ImageCaptionHandler:
                 provider, img_url, caption_prompt, img_type
             )
 
+            # 替换 [Image Captioning Failed] 标记（仅替换第一个匹配项）
             if hasattr(request, "extra_user_content_parts"):
-                request.extra_user_content_parts.append(TextPart(text=caption_tag))
+                for part in request.extra_user_content_parts:
+                    if hasattr(part, "text") and "[Image Captioning Failed]" in str(
+                        part.text
+                    ):
+                        part.text = caption_tag
+                        break
 
     async def _transcribe_one(
         self, provider: Any, img_url: str, prompt: str, img_type: str
