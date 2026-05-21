@@ -249,14 +249,14 @@
                 "default": false
             },
             "keyword_capture_context_max_cnt": {
-                "description": "上下文缓冲区最大消息数",
-                "hint": "内存中最多保留的消息条数，超出的最旧消息会被移除。建议 20-200。",
+                "description": "Session 缓冲区最大消息数",
+                "hint": "内存缓冲区中最多保留的消息条数，超出的最旧消息会被移除。建议 20-200。",
                 "type": "int",
                 "default": 100
             },
             "keyword_capture_context_history_limit": {
-                "description": "注入 LLM 的最大消息数",
-                "hint": "每次回复时从缓冲区取出的消息条数上限。建议 10-100。",
+                "description": "注入后 LLM 对话历史条数",
+                "hint": "每次回复时注入到 LLM 的对话历史消息条数。建议 10-100。",
                 "type": "int",
                 "default": 50
             },

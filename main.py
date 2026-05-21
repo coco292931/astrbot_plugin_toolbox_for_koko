@@ -21,7 +21,12 @@ from .core.kc_context import KCContextManager
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
 from .tools.weather import run_weather_location, run_weather, run_weather_history
 from .tools.search import run_search
-from .tools.fetch_url import run_fetch_url, _get_from_url, _normalize_and_validate_fetch_url, _parse_llm_compress_mode
+from .tools.fetch_url import (
+    run_fetch_url,
+    _get_from_url,
+    _normalize_and_validate_fetch_url,
+    _parse_llm_compress_mode,
+)
 from .tools.history import run_history
 from .tools.local_memory import (
     run_add_memory,
@@ -175,12 +180,21 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
 
     return incoming
 
-@register("astrbot_plugin_toolbox_for_koko", "coco", "多功能工具箱", "1.0.1", "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko")
+
+@register(
+    "astrbot_plugin_toolbox_for_koko",
+    "coco",
+    "多功能工具箱",
+    "1.0.2",
+    "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
+)
 class ToolboxPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         schema_defaults = load_schema_defaults()
-        incoming = extract_grouped_runtime_config(config if isinstance(config, dict) else {})
+        incoming = extract_grouped_runtime_config(
+            config if isinstance(config, dict) else {}
+        )
         merged = dict(schema_defaults)
         for key, value in incoming.items():
             # None / 空字符串按“未提供”处理，避免覆盖配置文件默认值
@@ -199,7 +213,7 @@ class ToolboxPlugin(Star):
         )
         self.qweather_geo_host = self.config.get("qweather_geo_host", "")
         self.zhipu_key = self.config.get("zhipu_key", "")
-        
+
         # 功能开关
         self.enable_weather = self.config.get("enable_weather", True)
         self.enable_search = self.config.get("enable_search", True)
@@ -251,12 +265,20 @@ class ToolboxPlugin(Star):
         self.kc_context = KCContextManager(self)
 
         # 网页抓取配置
-        self.fetch_url_max_chars = self._safe_int(self.config.get("fetch_url_max_chars"), 6000, 200, 200000)
-        self.fetch_url_over_limit_mode = str(self.config.get("fetch_url_over_limit_mode", "truncate") or "truncate").strip().lower()
+        self.fetch_url_max_chars = self._safe_int(
+            self.config.get("fetch_url_max_chars"), 6000, 200, 200000
+        )
+        self.fetch_url_over_limit_mode = (
+            str(self.config.get("fetch_url_over_limit_mode", "truncate") or "truncate")
+            .strip()
+            .lower()
+        )
         if self.fetch_url_over_limit_mode not in {"truncate", "ai_summary", "full"}:
             self.fetch_url_over_limit_mode = "truncate"
         summary_prompt_default = "请你作为一名资深气象分析师，根据系统提供的多日天气数据，生成一份简短、口语化、亲切友好的天气趋势总结。"
-        fetch_url_summary_prompt_default = "请根据以下网页正文提炼关键信息，给出准确、简洁的中文总结。"
+        fetch_url_summary_prompt_default = (
+            "请根据以下网页正文提炼关键信息，给出准确、简洁的中文总结。"
+        )
         self.summary_prompt = self.config.get(
             "summary_prompt",
             self.config.get("weather_summary_prompt", summary_prompt_default),
@@ -265,13 +287,22 @@ class ToolboxPlugin(Star):
             "fetch_url_summary_prompt",
             fetch_url_summary_prompt_default,
         )
-        self.fetch_url_summary_llm_provider_id = self.config.get("fetch_url_summary_llm_provider_id", "")
+        self.fetch_url_summary_llm_provider_id = self.config.get(
+            "fetch_url_summary_llm_provider_id", ""
+        )
         self.fetch_url_blocked_targets = self._parse_blocked_targets(
             self.config.get("fetch_url_blocked_targets", [])
         )
         # 默认放宽到 6MB，并允许按配置上调（上限 30MB），提升长文抓取成功率。
-        self.fetch_url_max_download_bytes = self._safe_int(self.config.get("fetch_url_max_download_bytes", 6 * 1024 * 1024), 6 * 1024 * 1024, 500_000, 30 * 1024 * 1024)
-        self.fetch_url_max_redirects = self._safe_int(self.config.get("fetch_url_max_redirects", 4), 4, 0, 10)
+        self.fetch_url_max_download_bytes = self._safe_int(
+            self.config.get("fetch_url_max_download_bytes", 6 * 1024 * 1024),
+            6 * 1024 * 1024,
+            500_000,
+            30 * 1024 * 1024,
+        )
+        self.fetch_url_max_redirects = self._safe_int(
+            self.config.get("fetch_url_max_redirects", 4), 4, 0, 10
+        )
 
         # 构建工具注册表（用于 call-search-run 三段式调用）
         self._tool_registry = self._build_tool_registry()
@@ -542,13 +573,6 @@ class ToolboxPlugin(Star):
                     platform_id=event.get_platform_id(),
                 )
 
-            conversation = None
-            if curr_cid:
-                conversation = await conv_mgr.get_conversation(
-                    event.unified_msg_origin,
-                    curr_cid,
-                )
-
             # 构建 prompt（注入群聊上下文，如果启用）
             if self.keyword_capture_manage_context:
                 final_prompt = await self.kc_context.build_prompt(
@@ -562,10 +586,13 @@ class ToolboxPlugin(Star):
             # 标记此请求由 keyword_capture 触发（供 on_llm_request 识别）
             event.set_extra("is_keyword_capture_request", True)
 
+            # 不传 conversation，避免 build_main_agent 从 conv.history 加载
+            # <system_reminder> 等系统消息到 req.contexts 中。
+            # 我们的上下文已通过 prompt 自带注入。
             yield event.request_llm(
                 prompt=final_prompt,
                 session_id=curr_cid or "",
-                conversation=conversation,
+                contexts=[],
             )
             event.stop_event()
         except Exception as e:
@@ -1842,6 +1869,17 @@ class ToolboxPlugin(Star):
                     idx = request.system_prompt.find(ltm_marker)
                     request.system_prompt = request.system_prompt[:idx].rstrip()
 
+                # 清理 <system_reminder>（运行时上下文标记，keyword_capture 不需要）
+                if hasattr(request, "extra_user_content_parts"):
+                    request.extra_user_content_parts = [
+                        part
+                        for part in request.extra_user_content_parts
+                        if not (
+                            hasattr(part, "text")
+                            and "<system_reminder>" in str(part.text)
+                        )
+                    ]
+
             guide_text = (
                 "[重要工具使用规范] 当你需要调用本能力时，必须遵循以下顺序：\n"
                 "1. 先调用 search_koko_tools，并传入简短关键词（如：天气、搜索、历史消息、网页抓取、记忆、发消息）。\n"
@@ -2058,4 +2096,3 @@ class ToolboxPlugin(Star):
             return {"status": "success", "message": text}
         except Exception as e:
             return {"status": "error", "message": str(e)}
-

@@ -109,6 +109,10 @@ class KCContextManager:
             while len(self._session_chats[umo]) > max_cnt:
                 self._session_chats[umo].pop(0)
 
+        logger.debug(
+            f"[kc] 记录消息 - 会话: {umo}，内容: {content[:50]}，图片数: {len(image_urls)}"
+        )
+
     async def record_reply(self, event: AstrMessageEvent, reply_text: str) -> None:
         """记录 AI 回复到上下文缓冲区。"""
         umo = event.unified_msg_origin
@@ -129,6 +133,8 @@ class KCContextManager:
             max_cnt = self.plugin.keyword_capture_context_max_cnt
             while len(self._session_chats[umo]) > max_cnt:
                 self._session_chats[umo].pop(0)
+
+        logger.debug(f"[kc] 记录回复 - 会话: {umo}，内容: {reply_text[:50]}")
 
     async def build_prompt(
         self,
@@ -161,6 +167,12 @@ class KCContextManager:
         # 取最近 N 条
         recent = entries[-history_limit:] if history_limit > 0 else entries
 
+        # 排除当前消息自身（它在 kc_context_recorder 中已被记录，
+        # 注入到 prompt 中会造成“当前消息在上下文和 prompt 各出现一次”的冗余）
+        current_msg_text = (event.get_message_outline() or "").strip()
+        if current_msg_text:
+            recent = [e for e in recent if e.get("content") != current_msg_text]
+
         # 图片转述（延迟执行，仅对最近的消息中的图片）
         recent = await self._transcribe_images(recent, image_limit)
 
@@ -172,10 +184,18 @@ class KCContextManager:
 
         chats_str = "\n---\n".join(context_lines)
 
+        # 如果没有上下文可注入，直接返回原消息
+        if not chats_str:
+            return message_text
+
         # 选择模板
         prompt_template = self.plugin.keyword_capture_context_prompt
         if not prompt_template:
             prompt_template = DEFAULT_CONTEXT_PROMPT_ZH
+
+        logger.debug(
+            f"[kc] 构建 prompt - 会话: {umo}，消息: {message_text[:30]}，上下文条数: {len(recent)}"
+        )
 
         try:
             return prompt_template.format(context=chats_str, prompt=message_text)
@@ -244,14 +264,24 @@ class KCContextManager:
                 except Exception as e:
                     logger.debug(f"[kc] 图片转述失败: {e}")
                     captions.append("[图片]")
+                    logger.debug(f"[kc] 图片转述失败 - URL: {url}，错误: {str(e)}")
+                logger.debug(
+                    f"[kc] 转述图片 - URL: {url}，描述: {captions[-1] if captions else None}"
+                )
 
             if captions:
                 # 替换 content 中的 [Image] 占位符
                 content = entry["content"]
                 for cap in captions:
                     content = content.replace("[Image]", f"[Image: {cap}]", 1)
-                entry = dict(entry)
-                entry["content"] = content
+                logger.debug(f"[kc] 替换图片占位符 - 内容: {content[:50]}")
+                new_entry = dict(entry)
+                new_entry["content"] = content
+                # 写回 result 列表中对应的位置
+                for i, e in enumerate(result):
+                    if e is entry:
+                        result[i] = new_entry
+                        break
 
         return result
 
