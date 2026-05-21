@@ -110,8 +110,8 @@ class ImageCaptionHandler:
         for img_url, img_type in image_infos:
             # 构建提示词
             prompt_template = self.plugin.image_caption_prompt_template
-            
-            #捕获 AstrBot 配置中的图片转述提示词（如果有的话），优先级低于插件配置
+
+            # 捕获 AstrBot 配置中的图片转述提示词（如果有的话），优先级低于插件配置
             ctx = self.plugin.context
             try:
                 cfg = ctx.get_config()
@@ -126,7 +126,7 @@ class ImageCaptionHandler:
                     prompt_template = self.DEFAULT_PROMPT_TEMPLATE
                 else:
                     prompt_template = astrbot_image_caption_prompt
-            
+
             try:
                 caption_prompt = prompt_template.format(image_type=img_type)
             except KeyError:

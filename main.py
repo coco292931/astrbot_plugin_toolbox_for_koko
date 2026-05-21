@@ -519,7 +519,7 @@ class ToolboxPlugin(Star):
 
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
-        priority=99,
+        priority=90,
     )
     async def keyword_capture_reply_handler(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
@@ -649,7 +649,7 @@ class ToolboxPlugin(Star):
 
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
-        priority=98,
+        priority=100,
     )
     async def kc_context_recorder(
         self, event: AstrMessageEvent, *args: Any, **kwargs: Any
