@@ -30,6 +30,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image as MsgImage
+from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.media_utils import compress_image
 
 
@@ -91,6 +92,16 @@ class ImageCaptionHandler:
             f"[ImageCaption] 检测到图片转述失败，尝试降级处理 {len(image_infos)} 张图片"
         )
 
+        # 先清理所有 [Image Attachment: path ...] 和 [Image Captioning Failed] 标记
+        if hasattr(request, "extra_user_content_parts"):
+            cleaned_parts = []
+            for part in request.extra_user_content_parts:
+                text = str(getattr(part, "text", ""))
+                if "[Image Attachment:" in text or "[Image Captioning Failed]" in text:
+                    continue  # 丢弃，后续用转述结果替换
+                cleaned_parts.append(part)
+            request.extra_user_content_parts = cleaned_parts
+
         provider = await self._resolve_caption_provider()
         if not provider:
             logger.warning("[ImageCaption] 未找到可用图片转述 Provider，跳过降级")
@@ -112,14 +123,9 @@ class ImageCaptionHandler:
                 provider, img_url, caption_prompt, img_type
             )
 
-            # 替换 [Image Captioning Failed] 标记（仅替换第一个匹配项）
+            # 追加转述结果
             if hasattr(request, "extra_user_content_parts"):
-                for part in request.extra_user_content_parts:
-                    if hasattr(part, "text") and "[Image Captioning Failed]" in str(
-                        part.text
-                    ):
-                        part.text = caption_tag
-                        break
+                request.extra_user_content_parts.append(TextPart(text=caption_tag))
 
     async def _resolve_caption_provider(self):
         """获取用于图片转述的 Provider。
