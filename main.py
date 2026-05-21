@@ -185,7 +185,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.0.2",
+    "1.0.3",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -573,26 +573,38 @@ class ToolboxPlugin(Star):
                     platform_id=event.get_platform_id(),
                 )
 
+            conversation = None
+            if curr_cid:
+                conversation = await conv_mgr.get_conversation(
+                    event.unified_msg_origin,
+                    curr_cid,
+                )
+
             # 构建 prompt（注入群聊上下文，如果启用）
             if self.keyword_capture_manage_context:
+                # logger.info(f"[keyword_capture] 开始构建上下文 prompt，会话: {event.unified_msg_origin}")
                 final_prompt = await self.kc_context.build_prompt(
                     event,
                     message_text,
                     image_limit=self.keyword_capture_context_image_limit,
                 )
+                # logger.info(f"[keyword_capture] 上下文 prompt 构建完成，长度: {len(final_prompt)} 字符"）
             else:
                 final_prompt = message_text
 
             # 标记此请求由 keyword_capture 触发（供 on_llm_request 识别）
             event.set_extra("is_keyword_capture_request", True)
 
-            # 不传 conversation，避免 build_main_agent 从 conv.history 加载
-            # <system_reminder> 等系统消息到 req.contexts 中。
-            # 我们的上下文已通过 prompt 自带注入。
+            logger.info(
+                f"[keyword_capture] 触发 LLM 请求 - 会话: {event.unified_msg_origin}, "
+                f"触发: {'关键词' if is_keyword_hit else '基础概率'}, "
+                f"prob={probability}, prompt_len={len(final_prompt)}"
+            )
+
             yield event.request_llm(
                 prompt=final_prompt,
                 session_id=curr_cid or "",
-                contexts=[],
+                conversation=conversation,
             )
             event.stop_event()
         except Exception as e:
@@ -617,6 +629,10 @@ class ToolboxPlugin(Star):
         if not self.keyword_capture_manage_context:
             return
         await self.kc_context.record_message(event)
+        logger.debug(
+            f"[keyword_capture] kc_context_recorder 已记录消息: "
+            f"{event.get_message_outline()[:40]}"
+        )
 
     def _parse_blocked_targets(self, raw_value) -> list[str]:
         """解析配置中的禁用目标列表，支持 host/ip 的 list 或 JSON 字符串数组。"""
@@ -1868,9 +1884,12 @@ class ToolboxPlugin(Star):
                 ):
                     idx = request.system_prompt.find(ltm_marker)
                     request.system_prompt = request.system_prompt[:idx].rstrip()
+                    logger.debug("[keyword_capture] 已撤销 LTM 群聊上下文追加")
 
                 # 清理 <system_reminder>（运行时上下文标记，keyword_capture 不需要）
+                cleaned = 0
                 if hasattr(request, "extra_user_content_parts"):
+                    before = len(request.extra_user_content_parts)
                     request.extra_user_content_parts = [
                         part
                         for part in request.extra_user_content_parts
@@ -1879,6 +1898,11 @@ class ToolboxPlugin(Star):
                             and "<system_reminder>" in str(part.text)
                         )
                     ]
+                    cleaned = before - len(request.extra_user_content_parts)
+                if cleaned > 0:
+                    logger.info(
+                        f"[keyword_capture] 已清理 {cleaned} 条 <system_reminder>"
+                    )
 
             guide_text = (
                 "[重要工具使用规范] 当你需要调用本能力时，必须遵循以下顺序：\n"
@@ -1955,6 +1979,10 @@ class ToolboxPlugin(Star):
                     reply_text = "\n".join(parts)
             if reply_text:
                 await self.kc_context.record_reply(event, reply_text)
+                logger.info(
+                    f"[keyword_capture] AI 回复已记录到上下文缓冲区，"
+                    f"长度: {len(reply_text)} 字符"
+                )
         except Exception as e:
             logger.debug(f"[on_llm_response] 记录回复失败: {e}")
 

@@ -184,9 +184,15 @@ class KCContextManager:
 
         chats_str = "\n---\n".join(context_lines)
 
-        # 如果没有上下文可注入，直接返回原消息
+        # 如果没有上下文可注入，至少带上发送者信息
         if not chats_str:
-            return message_text
+            nickname = getattr(
+                getattr(event.message_obj, "sender", None), "nickname", "User"
+            )
+            now_str = datetime.now().strftime("%H:%M:%S")
+            formatted = f"[{nickname}/{now_str}]: {message_text}"
+            logger.debug(f"[kc] 无历史上下文，返回单条格式化消息: {formatted[:60]}")
+            return formatted
 
         # 选择模板
         prompt_template = self.plugin.keyword_capture_context_prompt
