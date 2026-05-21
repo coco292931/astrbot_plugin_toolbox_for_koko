@@ -1,11 +1,32 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
-## [1.1.2] - 2026-05-22
+## [1.2.0] - 2026-05-22
 
 ### ✨ 新增
 
-- **图片转述前处理（`core/image_caption.py`）**：
-  - 新增 `ImageCaptionHandler`，在 `on_llm_request` 钩子中主动接管图片转述，**不让 AstrBot 处理图片**，从根本上规避其概率性吞图片的 bug。
+- **图片转述后处理（`core/image_caption.py`）**：
+  - 新增 `ImageCaptionHandler`，在 `on_llm_request` 钩子中检测 AstrBot 图片转述失败（`[Image Captioning Failed]` 标记），从原始消息重新提取图片进行降级转述。
+  - 支持自动识别 Provider：优先读取 AstrBot 配置的 `image_caption_provider_id`，其次回退到当前对话模型。
+  - 支持 URL 直传和降级（下载 → PIL GIF 取帧 → 本地路径重试）两种模式，降级后自动读取 AstrBot 压缩配置进行压缩。
+  - 清理 `[Image Attachment: path ...]` 和 `[Image Captioning Failed]` 标记，仅保留转述成功的 `[GIF: 描述]`。
+  - 新增 `image_caption` 独立配置组，包含 `image_caption_hook_enabled`（开关）和 `image_caption_prompt_template`（自定义提示词模板，支持 `{image_type}` 占位符）。
+
+- **被 @ 时跳过概率直接回复**：
+  - 新增 `keyword_capture_bypass_probability_on_at` 配置项（默认 false）。
+  - 开启后，当消息中包含 @机器人 时，忽略关键词概率和基础概率，必定触发回复。
+  - 检测逻辑：遍历消息组件中的 `At` 类型，匹配 `qq` 与机器人自身 ID。
+
+### 🔧 变更
+
+- **`ImageCaptionHandler` 从「前处理」改为「后处理」**：不再拦截 `req.image_urls`（此时 AstrBot 已处理完毕），改为检测 `extra_user_content_parts` 中的失败标记。
+- **`_resolve_caption_provider` 统一探测逻辑**：与 `kc_context._resolve_image_caption_provider` 一致的优先级（LTM 配置 → 当前 Provider），确保私聊也使用正确的图片转述模型。
+- **`kc_context._transcribe_images` 增强**：添加图片转述缓存 TTL（3600s），同 URL 不重复调用；GIF 下载后取第一帧转 JPEG 降级。
+- **`kc_context.record_message` 移除群聊限制**：私聊消息也可被上下文管理器记录。
+- **`kc_context.build_prompt` 无历史时返回格式化消息**：无上下文注入时返回 `[昵称/时间]: 消息` 格式，保持发送者信息一致性。
+
+### 🏗 项目结构
+
+- 新增 `core/image_caption.py` — 图片转述后处理器模块，与 `core/kc_context.py` 完全解耦。
   - 检测 `req.image_urls` 有内容时立即清空并自行转述，支持 URL 直传和降级（下载→PIL GIF 取帧→本地路径重试）两种模式。
   - 自动识别图片类型（通过 OneBot `sub_type` 区分普通图片和表情包），提示词模板支持 `{image_type}` 占位符。
   - 下载图片后自动读取 AstrBot 压缩配置（`image_compress_enabled/image_compress_options`）进行压缩，避免超大图片导致 Provider 报错。
@@ -29,6 +50,7 @@
 - 新增 `image_caption` 配置组：
   - `image_caption_hook_enabled`（bool, 默认 true）
   - `image_caption_prompt_template`（string, 默认 ""）
+  - 新增 `keyword_capture_bypass_probability_on_at`（bool, 默认 false，位于 `interaction` 分组）。
 
 ## [1.1.0] - 2026-05-21
 

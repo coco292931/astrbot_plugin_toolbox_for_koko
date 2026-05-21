@@ -5,7 +5,7 @@
 ## ✨ 功能特性
 
 - 💬 **关键词捕捉与群聊主动回复 (Interaction)**：监听特定关键词并按自定义概率触发对话回复。支持基础主动回复概率，未命中关键词时也可在群聊中按概率主动参与对话。内置独立的群聊上下文管理器（`KCContextManager`），记录群聊消息并注入上下文，支持延迟图片转述、自定义 prompt 模板，与 AstrBot LTM 完全解耦。
-- 🖼️ **图片转述前处理 (ImageCaption)**：在 `on_llm_request` 钩子中主动接管图片转述，规避 AstrBot 概率性吞图片的 bug。支持自动识别图片类型（普通图片/表情包/GIF），下载后压缩、GIF 取帧降级，与群聊上下文管理完全解耦。
+- 🖼️ **图片转述后处理 (ImageCaption)**：在 `on_llm_request` 钩子中检测 AstrBot 图片转述失败，自动从原始消息重新提取图片进行降级转述（下载、压缩、GIF 取帧）。自动清理 AstrBot 的失败标记，仅保留转述成功的内容。与群聊上下文管理完全解耦。
 - 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可直传原始 JSON 给大模型生成亲切的天气简报。
 - 🔍 **智能联网网页搜索**：集成智谱大模型搜索接口。支持普通/深度搜索、多粒度摘要提取、时效性过滤。
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
@@ -80,6 +80,7 @@ astrbot_plugin_toolbox_for_koko/
 - **keyword_capture_words**: 触发回复的关键词列表（如 `["koko", "可可"]`）。
 - **keyword_capture_reply_probability**: 关键词命中后回复的概率（`0` ~ `1.0`）。
 - **keyword_capture_base_probability**: 未命中关键词时在群聊中主动回复的基础概率。设为 `0` 关闭。
+- **keyword_capture_bypass_probability_on_at**: 被 @ 时跳过概率直接回复。开启后消息中包含 @机器人 时必定触发。
 - **keyword_capture_whitelist**: 群聊白名单，仅列表中的群 ID 才会触发。为空不启用。
 
 **会话管理：**
@@ -107,10 +108,10 @@ astrbot_plugin_toolbox_for_koko/
 - **use_session_filtering**: 是否启用会话过滤。
 - **platform_blacklist**: 平台黑名单列表。
 
-### 🖼️ 图片转述前处理 (image_caption)
+### 🖼️ 图片转述后处理 (image_caption)
 
-- **image_caption_hook_enabled**: 启用图片转述前处理。开启后所有 LLM 请求中的图片将由本插件自行转述，关闭时不影响群聊上下文中的图片转述。
-- **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型（图片/表情包等）。留空使用默认模板。
+- **image_caption_hook_enabled**: 启用图片转述后处理。开启后检测 AstrBot 图片转述失败并自动降级。关闭时不影响群聊上下文中的图片转述。
+- **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型。留空使用默认模板。
 
 ## 🚀 智能化工具调用机制
 

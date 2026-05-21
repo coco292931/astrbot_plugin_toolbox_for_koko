@@ -104,6 +104,7 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             "keyword_capture_context_history_limit",
             "keyword_capture_context_image_limit",
             "keyword_capture_context_prompt",
+            "keyword_capture_bypass_probability_on_at",
         ):
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)

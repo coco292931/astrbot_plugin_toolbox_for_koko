@@ -271,17 +271,23 @@
                 "hint": "可用 {context} 代表群聊上下文, {prompt} 代表用户消息。留空使用内置中文模板。",
                 "type": "string",
                 "default": ""
+            },
+            "keyword_capture_bypass_probability_on_at": {
+                "description": "被 @ 时跳过概率直接回复",
+                "hint": "开启后，当消息中包含 @机器人 时，忽略关键词概率和基础概率，必定回复。",
+                "type": "bool",
+                "default": false
             }
         }
     },
     "image_caption": {
-        "description": "图片转述前处理（独立于 AstrBot 图片处理）",
+        "description": "图片转述回退（补充 AstrBot 图片处理）",
         "type": "object",
-        "hint": "接管 LLM 请求中的图片转述，规避 AstrBot 概率性吞图片的 bug。",
+        "hint": "配置图片转述相关选项。开启后会对 AstrBot 处理失败的图片进行转述补充。",
         "items": {
             "image_caption_hook_enabled": {
-                "description": "启用图片转述前处理",
-                "hint": "开启后，所有 LLM 请求中的图片将由本插件自行转述，AstrBot 不再处理。",
+                "description": "启用图片回退转述",
+                "hint": "开启后，自动对 AstrBot 处理失败的图片重试",
                 "type": "bool",
                 "default": true
             },

@@ -139,6 +139,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "keyword_capture_context_history_limit",
             "keyword_capture_context_image_limit",
             "keyword_capture_context_prompt",
+            "keyword_capture_bypass_probability_on_at",
         ):
             if key in interaction_cfg:
                 incoming[key] = interaction_cfg.get(key)
@@ -195,7 +196,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.1.5",
+    "1.2.0",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -270,6 +271,9 @@ class ToolboxPlugin(Star):
         self.keyword_capture_context_prompt = str(
             self.config.get("keyword_capture_context_prompt", "") or ""
         ).strip()
+        self.keyword_capture_bypass_probability_on_at = self._safe_bool(
+            self.config.get("keyword_capture_bypass_probability_on_at", False), False
+        )
 
         # 群聊上下文管理器（仅管理上下文，不与关键词触发耦合）
         self.kc_context = KCContextManager(self)
@@ -569,6 +573,20 @@ class ToolboxPlugin(Star):
                 probability = self.keyword_capture_base_probability
                 if probability <= 0.0:
                     return
+
+            # 被 @ 时跳过概率门限（如果配置开启）
+            is_mentioned = False
+            if self.keyword_capture_bypass_probability_on_at:
+                self_id = event.get_self_id()
+                for comp in event.get_messages():
+                    if hasattr(comp, "qq") and str(getattr(comp, "qq", "")) == str(
+                        self_id
+                    ):
+                        is_mentioned = True
+                        break
+            if is_mentioned:
+                probability = 1.0
+                logger.debug("[keyword_capture] 被 @ 触发，跳过概率门限")
 
             # 概率门限
             roll = random.random()
