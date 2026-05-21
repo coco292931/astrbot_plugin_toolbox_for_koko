@@ -91,9 +91,9 @@ class ImageCaptionHandler:
             f"[ImageCaption] 检测到图片转述失败，尝试降级处理 {len(image_infos)} 张图片"
         )
 
-        provider = self.plugin.context.get_using_provider()
+        provider = await self._resolve_caption_provider()
         if not provider:
-            logger.warning("[ImageCaption] 未找到可用 Provider，跳过降级")
+            logger.warning("[ImageCaption] 未找到可用图片转述 Provider，跳过降级")
             return
 
         for img_url, img_type in image_infos:
@@ -120,6 +120,34 @@ class ImageCaptionHandler:
                     ):
                         part.text = caption_tag
                         break
+
+    async def _resolve_caption_provider(self):
+        """获取用于图片转述的 Provider。
+
+        优先级:
+          1. AstrBot 配置 provider_ltm_settings.image_caption_provider_id
+          2. 当前使用的第一个可用 Provider
+          3. None
+        """
+        ctx = self.plugin.context
+        try:
+            cfg = ctx.get_config()
+            caption_pid = cfg.get("provider_ltm_settings", {}).get(
+                "image_caption_provider_id", ""
+            )
+            if caption_pid:
+                provider = ctx.get_provider_by_id(caption_pid)
+                if provider:
+                    return provider
+        except Exception:
+            pass
+        try:
+            provider = ctx.get_using_provider()
+            if provider:
+                return provider
+        except Exception:
+            pass
+        return None
 
     async def _transcribe_one(
         self, provider: Any, img_url: str, prompt: str, img_type: str
