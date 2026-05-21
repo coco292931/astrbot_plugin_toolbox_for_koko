@@ -29,6 +29,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.platform import MessageType
+from astrbot.core.utils.io import download_image_by_url
 
 # 默认中文 prompt 模板
 DEFAULT_CONTEXT_PROMPT_ZH = (
@@ -52,6 +53,9 @@ FALLBACK_CONTEXT_PROMPT_EN = (
 class KCContextManager:
     """群聊上下文管理器。"""
 
+    # 图片转述结果缓存 TTL（秒），同一 URL 在 TTL 内不会重复转述
+    IMAGE_CAPTION_TTL = 3600 * 24 * 7  # 7天
+
     def __init__(self, plugin: Any) -> None:
         """
         Args:
@@ -61,6 +65,8 @@ class KCContextManager:
         # unified_msg_origin -> list[dict]
         self._session_chats: dict[str, list[dict]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        # image_url -> (timestamp, caption)
+        self._caption_cache: dict[str, tuple[float, str]] = {}
 
     # ---- 公开方法 ----
 
@@ -247,6 +253,15 @@ class KCContextManager:
             for url in images:
                 if transcribed >= image_limit:
                     break
+
+                # 查缓存
+                now_ts = datetime.now().timestamp()
+                cached = self._caption_cache.get(url)
+                if cached and (now_ts - cached[0]) < self.IMAGE_CAPTION_TTL:
+                    captions.append(cached[1])
+                    logger.debug(f"[kc] 图片转述命中缓存 - URL: {url[:40]}...")
+                    continue
+
                 try:
                     # 使用 AstrBot 配置的图片转述提示词
                     caption_prompt = "Please describe the image using Chinese."
@@ -265,12 +280,51 @@ class KCContextManager:
                         persist=False,
                     )
                     if caption and caption.completion_text:
-                        captions.append(caption.completion_text.strip())
+                        caption_text = caption.completion_text.strip()
+                        captions.append(caption_text)
+                        # 写入缓存
+                        self._caption_cache[url] = (now_ts, caption_text)
                     transcribed += 1
                 except Exception as e:
-                    logger.debug(f"[kc] 图片转述失败: {e}")
-                    captions.append("[图片]")
-                    logger.debug(f"[kc] 图片转述失败 - URL: {url}，错误: {str(e)}")
+                    logger.debug(f"[kc] 图片转述失败（URL方式），尝试下载后重试: {e}")
+                    # 降级：下载 → PIL 处理（GIF 取第一帧）→ 本地路径重试
+                    try:
+                        local_path = await download_image_by_url(url)
+                        from PIL import Image as PILImage
+
+                        with PILImage.open(local_path) as pil_img:
+                            if getattr(pil_img, "is_animated", False):
+                                pil_img.seek(0)
+                                frame = pil_img.convert("RGB")
+                                import uuid
+                                import os
+                                from astrbot.core.utils.astrbot_path import (
+                                    get_astrbot_temp_path,
+                                )
+
+                                frame_path = os.path.join(
+                                    get_astrbot_temp_path(),
+                                    f"kc_frame_{uuid.uuid4()}.jpg",
+                                )
+                                frame.save(frame_path, "JPEG", quality=85)
+                                local_path = frame_path
+                        caption2 = await provider.text_chat(
+                            prompt=caption_prompt,
+                            image_urls=[local_path],
+                            persist=False,
+                        )
+                        if caption2 and caption2.completion_text:
+                            caption_text = caption2.completion_text.strip()
+                            captions.append(caption_text)
+                            self._caption_cache[url] = (now_ts, caption_text)
+                            transcribed += 1
+                            logger.info(f"[kc] 图片转述降级成功 - URL: {url[:40]}...")
+                        else:
+                            raise Exception("降级转述返回空")
+                    except Exception as e2:
+                        logger.debug(f"[kc] 图片转述完全失败: {e2}")
+                        captions.append("[图片]")
+                        logger.debug(f"[kc] 图片转述失败 - URL: {url}，错误: {str(e2)}")
                 logger.debug(
                     f"[kc] 转述图片 - URL: {url}，描述: {captions[-1] if captions else None}"
                 )
