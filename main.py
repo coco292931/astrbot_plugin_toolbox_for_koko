@@ -300,7 +300,7 @@ class ToolboxPlugin(Star):
             f"type={type(_raw_audit_enabled).__name__}"
         )
         self.content_audit_enabled = self._safe_bool(
-            self.config.get("content_audit_enabled", False), False
+            self.config.get("content_audit_enabled", True), True
         )
         self.content_audit_rounds = self._safe_int(
             self.config.get("content_audit_rounds", 5), 5, 1, 50
