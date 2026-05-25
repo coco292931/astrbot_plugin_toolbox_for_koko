@@ -18,6 +18,7 @@ from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
 from .core.image_caption import ImageCaptionHandler
+from .core.content_audit import ContentAuditLoop
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
 from .tools.weather import run_weather_location, run_weather, run_weather_history
@@ -196,7 +197,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.2.0",
+    "1.2.1",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -277,6 +278,20 @@ class ToolboxPlugin(Star):
 
         # 群聊上下文管理器（仅管理上下文，不与关键词触发耦合）
         self.kc_context = KCContextManager(self)
+        self.content_audit_enabled = self._safe_bool(
+            self.config.get("content_audit_enabled", False), False
+        )
+        self.content_audit_rounds = self._safe_int(
+            self.config.get("content_audit_rounds", 5), 5, 1, 50
+        )
+        self.content_audit_fetch_rounds = self._safe_int(
+            self.config.get("content_audit_fetch_rounds", 5), 5, 1, 50
+        )
+        self.content_audit_criteria = str(
+            self.config.get("content_audit_criteria", "") or ""
+        ).strip()
+        if self.content_audit_enabled:
+            self.content_audit = ContentAuditLoop(self)
 
         # 图片转述前处理（在 on_llm_request 中接管图片转述）
         self.image_caption_hook_enabled = self._safe_bool(
@@ -500,6 +515,24 @@ class ToolboxPlugin(Star):
             if isinstance(value, str) and value.strip():
                 return value
 
+        return ""
+
+    def _extract_reply_text(self, response: Any) -> str:
+        """从 LLMResponse 对象中提取回复文本。"""
+        if response is None:
+            return ""
+        if hasattr(response, "completion_text") and response.completion_text:
+            return response.completion_text
+        if hasattr(response, "result_chain") and response.result_chain:
+            chain = getattr(response.result_chain, "chain", None)
+            if isinstance(chain, list):
+                parts = []
+                for comp in chain:
+                    text = getattr(comp, "text", None)
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text)
+                if parts:
+                    return "\n".join(parts).strip()
         return ""
 
     def _safe_float(self, value, default: float, min_v: float, max_v: float) -> float:
@@ -1995,29 +2028,41 @@ class ToolboxPlugin(Star):
                                 request.system_prompt += f"\n{memory_block}\n"
                             else:
                                 request.system_prompt = memory_block + "\n"
+
+            # ---- 注入内容审核校正指示 ----
+            if hasattr(self, "content_audit"):
+                try:
+                    await self.content_audit.inject_to_request(
+                        event.unified_msg_origin, request
+                    )
+                except Exception as e:
+                    logger.debug(f"[content_audit] 注入校正指示失败: {e}")
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
-        """LLM 响应后，记录 AI 回复到群聊上下文缓冲区。"""
+        """LLM 响应后：内容审核（独立） + 记录回复到上下文缓冲区（keyword_capture）。"""
         try:
+            reply_text = self._extract_reply_text(response)
+
+            # ---- 审核链路（独立于 keyword_capture） ----
+            if hasattr(self, "content_audit") and reply_text:
+                try:
+                    provider = self.context.get_using_provider()
+                    await self.content_audit.on_ai_reply(
+                        event.unified_msg_origin,
+                        reply_text,
+                        provider,
+                    )
+                except Exception as e:
+                    logger.debug(f"[content_audit] 审核失败: {e}")
+
+            # ---- keyword_capture 链路 ----
             if not event.get_extra("is_keyword_capture_request"):
                 return
             if not self.keyword_capture_manage_context:
                 return
-            reply_text = ""
-            if hasattr(response, "completion_text") and response.completion_text:
-                reply_text = response.completion_text
-            elif hasattr(response, "result_chain") and response.result_chain:
-                chain = getattr(response.result_chain, "chain", None)
-                if isinstance(chain, list):
-                    parts = []
-                    for comp in chain:
-                        text = getattr(comp, "text", None)
-                        if isinstance(text, str) and text.strip():
-                            parts.append(text)
-                    reply_text = "\n".join(parts)
             if reply_text:
                 await self.kc_context.record_reply(event, reply_text)
                 logger.info(
@@ -2025,7 +2070,7 @@ class ToolboxPlugin(Star):
                     f"长度: {len(reply_text)} 字符"
                 )
         except Exception as e:
-            logger.debug(f"[on_llm_response] 记录回复失败: {e}")
+            logger.debug(f"[on_llm_response] 处理失败: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")
