@@ -96,6 +96,10 @@ class ContentAuditLoop:
         if not provider:
             return
 
+        logger.debug(
+            f"[ContentAudit] on_ai_reply 被调用，会话 {session_id}，回复长度 {len(reply_text)}"
+        )
+        
         # 判断是否为关键词触发
         is_keyword_trigger = bool(
             self._audit_keywords
