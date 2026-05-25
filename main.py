@@ -290,6 +290,15 @@ class ToolboxPlugin(Star):
 
         # 群聊上下文管理器（仅管理上下文，不与关键词触发耦合）
         self.kc_context = KCContextManager(self)
+
+        # ---- content_audit 配置加载 ----
+        _raw_audit_enabled = self.config.get("content_audit_enabled", "KEY_NOT_FOUND")
+        logger.debug(
+            f"[content_audit] __init__ 配置检查: "
+            f"config keys={list(self.config.keys())}, "
+            f"raw content_audit_enabled={_raw_audit_enabled!r}, "
+            f"type={type(_raw_audit_enabled).__name__}"
+        )
         self.content_audit_enabled = self._safe_bool(
             self.config.get("content_audit_enabled", False), False
         )
@@ -305,8 +314,13 @@ class ToolboxPlugin(Star):
         self.content_audit_keywords = self._parse_keywords(
             self.config.get("content_audit_keywords", [])
         )
+        logger.debug(
+            f"[content_audit] __init__ 实例化条件: "
+            f"content_audit_enabled={self.content_audit_enabled}"
+        )
         if self.content_audit_enabled:
             self.content_audit = ContentAuditLoop(self)
+            logger.info("[content_audit] ContentAuditLoop 已实例化")
 
         # 图片转述前处理（在 on_llm_request 中接管图片转述）
         self.image_caption_hook_enabled = self._safe_bool(
