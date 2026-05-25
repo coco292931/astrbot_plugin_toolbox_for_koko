@@ -536,6 +536,8 @@ class ToolboxPlugin(Star):
         """从 LLMResponse 对象中提取回复文本。"""
         if response is None:
             return ""
+        if isinstance(response, str):
+            return response
         if hasattr(response, "completion_text") and response.completion_text:
             return response.completion_text
         if hasattr(response, "result_chain") and response.result_chain:
@@ -548,6 +550,12 @@ class ToolboxPlugin(Star):
                         parts.append(text)
                 if parts:
                     return "\n".join(parts).strip()
+        # 兜底：尝试从 dict 中提取
+        if isinstance(response, dict):
+            for key in ("completion_text", "text", "content", "message"):
+                val = response.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
         return ""
 
     def _safe_float(self, value, default: float, min_v: float, max_v: float) -> float:
@@ -2044,9 +2052,10 @@ class ToolboxPlugin(Star):
                                 request.system_prompt = memory_block + "\n"
 
             # ---- 注入内容审核校正指示 ----
-            if hasattr(self, "content_audit"):
+            audit_loop = getattr(self, "content_audit", None)
+            if audit_loop:
                 try:
-                    await self.content_audit.inject_to_request(
+                    await audit_loop.inject_to_request(
                         event.unified_msg_origin, request
                     )
                 except Exception as e:
@@ -2057,20 +2066,49 @@ class ToolboxPlugin(Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
         """LLM 响应后：内容审核（独立） + 记录回复到上下文缓冲区（keyword_capture）。"""
+        logger.debug(
+            f"[content_audit] on_llm_response 入口, "
+            f"会话={event.unified_msg_origin}, "
+            f"has_content_audit={hasattr(self, 'content_audit')}, "
+            f"content_audit_enabled={getattr(self, 'content_audit_enabled', 'N/A')}"
+        )
         try:
             reply_text = self._extract_reply_text(response)
+            logger.debug(
+                f"[content_audit] 提取回复文本, "
+                f"reply_text 长度={len(reply_text)}, "
+                f"response type={type(response).__name__}"
+            )
 
             # ---- 审核链路（独立于 keyword_capture） ----
-            if hasattr(self, "content_audit") and reply_text:
-                try:
-                    provider = self.context.get_using_provider()
-                    await self.content_audit.on_ai_reply(
-                        event.unified_msg_origin,
-                        reply_text,
-                        provider,
+            audit_loop = getattr(self, "content_audit", None)
+            if audit_loop:
+                if reply_text:
+                    try:
+                        provider = self.context.get_using_provider()
+                        logger.debug(
+                            f"[content_audit] 准备调用 on_ai_reply, "
+                            f"会话={event.unified_msg_origin}, "
+                            f"provider={'有' if provider else '无'}"
+                        )
+                        await audit_loop.on_ai_reply(
+                            event.unified_msg_origin,
+                            reply_text,
+                            provider,
+                        )
+                    except Exception as e:
+                        logger.debug(f"[content_audit] 审核失败: {e}")
+                else:
+                    logger.debug(
+                        f"[content_audit] 跳过审核: reply_text 为空, "
+                        f"response type={type(response).__name__}, "
+                        f"response dir={[a for a in dir(response) if not a.startswith('_')][:10]}"
                     )
-                except Exception as e:
-                    logger.debug(f"[content_audit] 审核失败: {e}")
+            else:
+                logger.debug(
+                    f"[content_audit] 跳过审核: content_audit 对象不存在, "
+                    f"content_audit_enabled={getattr(self, 'content_audit_enabled', 'N/A')}"
+                )
 
             # ---- keyword_capture 链路 ----
             if not event.get_extra("is_keyword_capture_request"):

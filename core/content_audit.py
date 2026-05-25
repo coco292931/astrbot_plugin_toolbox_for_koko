@@ -92,14 +92,17 @@ class ContentAuditLoop:
             provider: LLM Provider 实例
         """
         if not session_id:
+            logger.debug("[ContentAudit] 跳过: session_id 为空")
             return
         if not provider:
+            logger.debug("[ContentAudit] 跳过: provider 为空")
             return
 
-        logger.debug(
-            f"[ContentAudit] on_ai_reply 被调用，会话 {session_id}，回复长度 {len(reply_text)}"
+        logger.info(
+            f"[ContentAudit] on_ai_reply 被调用，会话 {session_id}，"
+            f"回复长度 {len(reply_text)}"
         )
-        
+
         # 判断是否为关键词触发
         is_keyword_trigger = bool(
             self._audit_keywords
@@ -119,18 +122,25 @@ class ContentAuditLoop:
         async with self._counter_lock:
             current_count = self._counters.get(session_id, 0)
 
+        logger.debug(
+            f"[ContentAudit] 会话 {session_id} 当前计数={current_count}, "
+            f"is_keyword_trigger={is_keyword_trigger}, "
+            f"轮数阈值={self._audit_rounds * 2}"
+        )
+
         if not is_keyword_trigger:
             # 轮数触发：递增计数器，检查阈值
             current_count += 1
             async with self._counter_lock:
                 self._counters[session_id] = current_count
 
-            logger.debug(
+            logger.info(
                 f"[ContentAudit] 会话 {session_id} 消息计数: "
                 f"{current_count}/{self._audit_rounds * 2}"
             )
 
             if current_count < self._audit_rounds * 2:
+                logger.debug(f"[ContentAudit] 会话 {session_id} 未达阈值，跳过审核")
                 return
 
         # 关键词触发 或 轮数已达阈值 → 执行审核
@@ -148,6 +158,7 @@ class ContentAuditLoop:
         else:
             fetch_count = self._fetch_rounds * 2
 
+        logger.debug(f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息")
         conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
         if not conversation_text:
             logger.warning("[ContentAudit] 无可审核的对话内容，跳过")
@@ -155,14 +166,22 @@ class ContentAuditLoop:
                 self._counters[session_id] = 0
             return
 
+        logger.debug(
+            f"[ContentAudit] 会话 {session_id} 对话文本长度={len(conversation_text)}"
+        )
+
         # 2. 取上次校正方向
         last_correction = ""
         async with self._correction_lock:
             prev = self._corrections.get(session_id)
             if prev and prev.strip():
                 last_correction = prev.strip()
+                logger.debug(
+                    f"[ContentAudit] 会话 {session_id} 有上次校正: {last_correction[:40]}..."
+                )
 
         # 3. 调审核 LLM
+        logger.info(f"[ContentAudit] 会话 {session_id} 调用审核 LLM...")
         try:
             correction = await self._call_audit_llm(
                 provider, conversation_text, last_correction
@@ -171,6 +190,11 @@ class ContentAuditLoop:
             logger.error(f"[ContentAudit] 审核 LLM 调用失败: {e}")
             correction = None
 
+        logger.info(
+            f"[ContentAudit] 会话 {session_id} 审核 LLM 返回: "
+            f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}"
+        )
+
         # 4. 存储结果
         async with self._correction_lock:
             self._corrections[session_id] = correction
@@ -178,6 +202,7 @@ class ContentAuditLoop:
         # 5. 重置计数器（所有触发方式都重置）
         async with self._counter_lock:
             self._counters[session_id] = 0
+            logger.debug(f"[ContentAudit] 会话 {session_id} 计数器已重置")
 
         if correction:
             logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:60]}...")
@@ -192,15 +217,25 @@ class ContentAuditLoop:
             request: ProviderRequest 对象
         """
         if not session_id:
+            logger.debug("[ContentAudit] inject_to_request 跳过: session_id 为空")
             return
+
+        logger.debug(f"[ContentAudit] inject_to_request 被调用，会话 {session_id}")
 
         # 取出并清除（一次性）
         async with self._correction_lock:
             correction = self._corrections.pop(session_id, None)
 
+        logger.debug(
+            f"[ContentAudit] 会话 {session_id} 取出校正: "
+            f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}"
+        )
+
         if correction is None:
+            logger.debug(f"[ContentAudit] 会话 {session_id} 无校正结果，跳过注入")
             return  # 还没有审核结果
         if not correction.strip():
+            logger.debug(f"[ContentAudit] 会话 {session_id} 无需调整，跳过注入")
             return  # "无需调整"
 
         # 以 <system_WARNING> 格式注入
