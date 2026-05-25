@@ -209,7 +209,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.2.2",
+    "1.2.3",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -300,7 +300,7 @@ class ToolboxPlugin(Star):
             f"type={type(_raw_audit_enabled).__name__}"
         )
         self.content_audit_enabled = self._safe_bool(
-            self.config.get("content_audit_enabled", True), True
+            self.config.get("content_audit_enabled", False), False
         )
         self.content_audit_rounds = self._safe_int(
             self.config.get("content_audit_rounds", 5), 5, 1, 50

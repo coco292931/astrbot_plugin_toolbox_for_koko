@@ -151,6 +151,18 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
                 "password": auth_cfg.get("password", ""),
             }
 
+    content_audit_cfg = raw.get("content_audit", {})
+    if isinstance(content_audit_cfg, dict):
+        for key in (
+            "content_audit_enabled",
+            "content_audit_rounds",
+            "content_audit_fetch_rounds",
+            "content_audit_criteria",
+            "content_audit_keywords",
+        ):
+            if key in content_audit_cfg:
+                incoming[key] = content_audit_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 
