@@ -2100,11 +2100,11 @@ class ToolboxPlugin(Star):
                 if reply_text:
                     try:
                         provider = self.context.get_using_provider()
-                        logger.debug(
-                            f"[content_audit] 准备调用 on_ai_reply, "
-                            f"会话={event.unified_msg_origin}, "
-                            f"provider={'有' if provider else '无'}"
-                        )
+                        # logger.debug(
+                        #     f"[content_audit] 准备调用 on_ai_reply, "
+                        #     f"会话={event.unified_msg_origin}, "
+                        #     f"provider={'有' if provider else '无'}"
+                        # )
                         await audit_loop.on_ai_reply(
                             event.unified_msg_origin,
                             reply_text,

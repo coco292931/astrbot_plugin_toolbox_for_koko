@@ -34,6 +34,7 @@ DEFAULT_AUDIT_PROMPT = (
     "输出格式：\n"
     "- 如果完全符合上述所有标准 → 回复：无需调整\n"
     "- 如果存在任何不符合项 → 回复：调整方向:<简洁、清晰、可执行的校正指示，并说明“建议”还是“要求”>（例如：“建议使用更活泼的语气”“建议将‘我看看’改为‘让我看看汪~’”“删除括号内的‘像是’句式，只写动作‘（停了一下）’”）\n"
+    "- 如果无法判断或审核失败 → 回复：无法进行审核\n"
     "- 如果对话中用户有要求，则以用户要求为优先，临时更改、减弱或忽略部分调整项。\n"
     "- 矫正规则可以适当放宽，忽略轻微偏移，但若触发重点或禁止性规则，则必须说明。\n"
     "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。"
@@ -122,11 +123,11 @@ class ContentAuditLoop:
         async with self._counter_lock:
             current_count = self._counters.get(session_id, 0)
 
-        logger.debug(
-            f"[ContentAudit] 会话 {session_id} 当前计数={current_count}, "
-            f"is_keyword_trigger={is_keyword_trigger}, "
-            f"轮数阈值={self._audit_rounds * 2}"
-        )
+        # logger.debug(
+        #     f"[ContentAudit] 会话 {session_id} 当前计数={current_count}, "
+        #     f"is_keyword_trigger={is_keyword_trigger}, "
+        #     f"消息阈值={self._audit_rounds}"
+        # )
 
         if not is_keyword_trigger:
             # 轮数触发：递增计数器，检查阈值
@@ -136,29 +137,33 @@ class ContentAuditLoop:
 
             logger.info(
                 f"[ContentAudit] 会话 {session_id} 消息计数: "
-                f"{current_count}/{self._audit_rounds * 2}"
+                f"{current_count}/{self._audit_rounds}"
             )
 
-            if current_count < self._audit_rounds * 2:
+            if current_count < self._audit_rounds:
                 logger.debug(f"[ContentAudit] 会话 {session_id} 未达阈值，跳过审核")
                 return
 
         # 关键词触发 或 轮数已达阈值 → 执行审核
         logger.info(
             f"[ContentAudit] 会话 {session_id} "
-            f"{'关键词触发' if is_keyword_trigger else '达到轮数'}，开始审核..."
+            f"{'关键词触发' if is_keyword_trigger else '达到消息阈值'}，开始审核..."
         )
 
-        # 1. 取最近的消息
+        # 1. 将本次 AI 回复写入 _session_chats，确保审核 LLM 能看到
+        self._append_reply_to_buffer(session_id, reply_text)
+
+        # 2. 取最近的消息
         #    关键词触发：取当前计数条（从上次重置到现在的所有消息）
-        #    轮数触发：取配置的 fetch_rounds
+        #    轮数触发：取配置的 fetch_rounds 轮（每轮 2 条消息），但不超过缓冲区实际数量
         if is_keyword_trigger:
-            # 包含本次回复，所以 +1
             fetch_count = current_count + 1
         else:
             fetch_count = self._fetch_rounds * 2
 
-        logger.debug(f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息")
+        logger.debug(
+            f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息"
+        )
         conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
         if not conversation_text:
             logger.warning("[ContentAudit] 无可审核的对话内容，跳过")
@@ -262,6 +267,36 @@ class ContentAuditLoop:
 
         # ---- 内部方法 ----
 
+    def _append_reply_to_buffer(self, session_id: str, reply_text: str) -> None:
+        """将本次 AI 回复写入 _session_chats，确保审核 LLM 能读到。"""
+        kc_context = getattr(self.plugin, "kc_context", None)
+        if not kc_context:
+            return
+        session_chats = getattr(kc_context, "_session_chats", None)
+        if session_chats is None:
+            return
+        if session_id not in session_chats:
+            return
+
+        from datetime import datetime
+
+        now = datetime.now()
+        entry = {
+            "role": "assistant",
+            "nickname": "Bot",
+            "time": now.strftime("%H:%M:%S"),
+            "content": reply_text.strip(),
+            "images": [],
+        }
+        session_chats[session_id].append(entry)
+        # 同样遵守最大消息数限制
+        max_cnt = getattr(self.plugin, "keyword_capture_context_max_cnt", 100)
+        while len(session_chats[session_id]) > max_cnt:
+            session_chats[session_id].pop(0)
+        logger.debug(
+            f"[ContentAudit] 已写入本次回复到 _session_chats，会话 {session_id}"
+        )
+
     def _fetch_recent_conversation(
         self, session_id: str, max_entries: int | None = None
     ) -> str:
@@ -342,7 +377,7 @@ class ContentAuditLoop:
             return None
 
         # 解析结果
-        if "无需调整" in result_text:
+        if "无需调整" in result_text or "无法进行审核" in result_text:
             return ""
 
         # 提取调整方向
