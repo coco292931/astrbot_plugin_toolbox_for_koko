@@ -161,9 +161,7 @@ class ContentAuditLoop:
         else:
             fetch_count = self._fetch_rounds * 2
 
-        logger.debug(
-            f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息"
-        )
+        logger.debug(f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息")
         conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
         if not conversation_text:
             logger.warning("[ContentAudit] 无可审核的对话内容，跳过")

@@ -33,7 +33,8 @@ astrbot_plugin_toolbox_for_koko/
 │   ├── config.py             # 配置加载与解析工具函数
 │   ├── memory_manager.py     # 内存管理器（本地 JSON 存储）
 │   ├── kc_context.py         # 群聊上下文管理器（KCContextManager）
-│   └── image_caption.py      # 图片转述前处理器（ImageCaptionHandler）
+│   ├── image_caption.py      # 图片转述前处理器（ImageCaptionHandler）
+│   └── content_audit.py      # 自动内容审核校正器（ContentAuditLoop）
 ├── tools/
 │   ├── __init__.py
 │   ├── weather.py            # 天气查询（位置、实时、多日、历史）
@@ -112,6 +113,16 @@ astrbot_plugin_toolbox_for_koko/
 
 - **image_caption_hook_enabled**: 启用图片转述后处理。开启后检测 AstrBot 图片转述失败并自动降级。关闭时不影响群聊上下文中的图片转述。
 - **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型。留空使用默认模板。
+
+### 📋 自动内容审核校正 (content_audit)
+
+自动审核 AI 回复质量，支持轮数触发和关键词触发两种方式。审核结果会在下一条用户消息时以 `<system_WARNING>` 标签注入，引导 LLM 调整回复风格。
+
+- **content_audit_enabled**: 总开关。开启后每 N 条 AI 回复触发一次审核。
+- **content_audit_rounds**: 审核触发消息条数阈值（默认 5）。每 N 条 AI 回复触发一次审核。
+- **content_audit_fetch_rounds**: 审核时抓取的消息条数（默认 10）。
+- **content_audit_criteria**: 审核标准文本。定义 AI 回复应遵守的标准，LLM 将据此判断回复质量。
+- **content_audit_keywords**: 审核关键词列表（如 `["我不确定", "抱歉"]`）。AI 回复命中关键词时立即触发审核。
 
 ## 🚀 智能化工具调用机制
 

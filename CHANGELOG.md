@@ -1,6 +1,40 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
-## [1.2.0] - 2026-05-22
+## [1.3.0] - 2026-05-26
+
+### ✨ 新增
+
+- **自动内容审核校正（`core/content_audit.py`）**：
+  - 新增 `ContentAuditLoop` 类，提供独立的 LLM 回复审核校正能力，与 keyword_capture 上下文管理完全解耦。
+  - **双触发机制**：支持轮数触发和关键词触发两种审核触发方式。
+    - 轮数触发：每 N 条 AI 回复自动触发一次审核，审核后计数器重置。
+    - 关键词触发：AI 回复命中审核关键词时立即触发审核，不消耗轮数计数器。
+  - 审核流程：从 `_session_chats` 抓取最近对话 → 合并审核标准与上次校正方向 → 调用审核 LLM → 存储结果。
+  - 校正注入：下一条用户消息时以 `<system_WARNING>` 标签注入到 `extra_user_content_parts`，LLM 据此调整回复。
+  - 纯内存设计：计数器与校正结果均为内存存储，重启即重置，零外部依赖。
+  - 审核 LLM 结果解析：支持"无需调整"和"调整方向:xxx"两种输出格式。
+
+- **新增 `content_audit` 独立配置组**：
+  - `content_audit_enabled`（bool, 默认 false）— 总开关。
+  - `content_audit_rounds`（int, 默认 5）— 审核触发消息条数阈值。
+  - `content_audit_fetch_rounds`（int, 默认 10）— 审核时抓取的消息条数。
+  - `content_audit_criteria`（string）— 审核标准文本，LLM 据此判断回复质量。
+  - `content_audit_keywords`（list）— 审核关键词列表，命中即触发。
+
+### 🔧 变更
+
+- **`kc_context_recorder` 守卫条件放宽**：由仅 `keyword_capture_manage_context` 改为 `keyword_capture_manage_context or content_audit_enabled`，审核链路可独立使用上下文缓冲区。
+- **`config.py` 同步**：`extract_grouped_runtime_config` 新增 `content_audit` 分组读取。
+- **`on_llm_response` 重构**：审核链路（独立）放在 keyword_capture 守卫之前，确保对所有 LLM 回复生效。
+- **`_extract_reply_text` 增强**：增加 `str` 类型直接返回和 `dict` 类型兜底提取，覆盖更多 response 结构。
+
+### 🏗 项目结构
+
+- 新增 `core/content_audit.py` — 自动内容审核校正器模块，与 `core/kc_context.py` 解耦。
+
+### ⚙ 配置更新
+
+- 新增 `content_audit` 配置组，包含 5 个配置项。详见 README。
 
 ### ✨ 新增
 
