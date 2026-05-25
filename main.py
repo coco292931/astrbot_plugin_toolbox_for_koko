@@ -187,6 +187,18 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
                 "password": auth_cfg.get("password", ""),
             }
 
+    content_audit_cfg = raw.get("content_audit", {})
+    if isinstance(content_audit_cfg, dict):
+        for key in (
+            "content_audit_enabled",
+            "content_audit_rounds",
+            "content_audit_fetch_rounds",
+            "content_audit_criteria",
+            "content_audit_keywords",
+        ):
+            if key in content_audit_cfg:
+                incoming[key] = content_audit_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 
@@ -197,7 +209,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.2.1",
+    "1.2.2",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -290,6 +302,9 @@ class ToolboxPlugin(Star):
         self.content_audit_criteria = str(
             self.config.get("content_audit_criteria", "") or ""
         ).strip()
+        self.content_audit_keywords = self._parse_keywords(
+            self.config.get("content_audit_keywords", [])
+        )
         if self.content_audit_enabled:
             self.content_audit = ContentAuditLoop(self)
 
@@ -691,17 +706,16 @@ class ToolboxPlugin(Star):
         上下文记录器。
 
         独立于 keyword_capture_reply_handler 运行，无差别记录所有群聊/私聊消息。
-        仅在 keyword_capture_manage_context=True 时生效。
+        当 keyword_capture_manage_context 或 content_audit_enabled 任一开启时生效。
         图片不在此处转述（触发回复时统一转述），仅存 URL。
         """
         if not self.enable_keyword_capture_reply:
             return
-        if not self.keyword_capture_manage_context:
+        if not self.keyword_capture_manage_context and not self.content_audit_enabled:
             return
         await self.kc_context.record_message(event)
         logger.debug(
-            f"[keyword_capture] kc_context_recorder 已记录消息: "
-            f"{event.get_message_outline()[:40]}"
+            f"[kc] kc_context_recorder 已记录消息: {event.get_message_outline()[:40]}"
         )
 
     def _parse_blocked_targets(self, raw_value) -> list[str]:

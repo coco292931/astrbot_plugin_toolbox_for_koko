@@ -60,6 +60,11 @@ class ContentAuditLoop:
             or "回复应当友好、有用，不包含敏感内容。"
         )
 
+        # 审核关键词（针对 AI 回复内容匹配，命中后直接生成校正指示）
+        self._audit_keywords: list[str] = getattr(plugin, "content_audit_keywords", [])
+        if not isinstance(self._audit_keywords, list):
+            self._audit_keywords = []
+
         # session_id -> int（消息计数器）
         self._counters: dict[str, int] = {}
         self._counter_lock = asyncio.Lock()
@@ -91,39 +96,69 @@ class ContentAuditLoop:
         if not provider:
             return
 
-        # 1. 递增计数器
+        # 判断是否为关键词触发
+        is_keyword_trigger = bool(
+            self._audit_keywords
+            and reply_text
+            and any(kw in reply_text for kw in self._audit_keywords)
+        )
+
+        if is_keyword_trigger:
+            logger.info(
+                f"[ContentAudit] 关键词触发审核，会话 {session_id}，"
+                f"回复: {reply_text[:60]}..."
+            )
+
+        # ---- 轮数触发 / 关键词触发共享的审核路径 ----
+
+        # 获取当前计数（关键词触发不递增，直接取当前值）
         async with self._counter_lock:
-            count = self._counters.get(session_id, 0) + 1
-            self._counters[session_id] = count
+            current_count = self._counters.get(session_id, 0)
 
-        logger.debug(
-            f"[ContentAudit] 会话 {session_id} 消息计数: {count}/{self._audit_rounds * 2}"
-        )
+        if not is_keyword_trigger:
+            # 轮数触发：递增计数器，检查阈值
+            current_count += 1
+            async with self._counter_lock:
+                self._counters[session_id] = current_count
 
-        # 2. 检查是否达到阈值
-        if count < self._audit_rounds * 2:
-            return
+            logger.debug(
+                f"[ContentAudit] 会话 {session_id} 消息计数: "
+                f"{current_count}/{self._audit_rounds * 2}"
+            )
 
+            if current_count < self._audit_rounds * 2:
+                return
+
+        # 关键词触发 或 轮数已达阈值 → 执行审核
         logger.info(
-            f"[ContentAudit] 会话 {session_id} 达到 {self._audit_rounds} 轮，开始审核..."
+            f"[ContentAudit] 会话 {session_id} "
+            f"{'关键词触发' if is_keyword_trigger else '达到轮数'}，开始审核..."
         )
 
-        # 3. 取最近的消息
-        conversation_text = self._fetch_recent_conversation(session_id)
+        # 1. 取最近的消息
+        #    关键词触发：取当前计数条（从上次重置到现在的所有消息）
+        #    轮数触发：取配置的 fetch_rounds
+        if is_keyword_trigger:
+            # 包含本次回复，所以 +1
+            fetch_count = current_count + 1
+        else:
+            fetch_count = self._fetch_rounds * 2
+
+        conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
         if not conversation_text:
             logger.warning("[ContentAudit] 无可审核的对话内容，跳过")
             async with self._counter_lock:
                 self._counters[session_id] = 0
             return
 
-        # 4. 取上次校正方向
+        # 2. 取上次校正方向
         last_correction = ""
         async with self._correction_lock:
             prev = self._corrections.get(session_id)
             if prev and prev.strip():
                 last_correction = prev.strip()
 
-        # 5. 调审核 LLM
+        # 3. 调审核 LLM
         try:
             correction = await self._call_audit_llm(
                 provider, conversation_text, last_correction
@@ -132,16 +167,16 @@ class ContentAuditLoop:
             logger.error(f"[ContentAudit] 审核 LLM 调用失败: {e}")
             correction = None
 
-        # 6. 存储结果
+        # 4. 存储结果
         async with self._correction_lock:
             self._corrections[session_id] = correction
 
-        # 7. 重置计数器
+        # 5. 重置计数器（所有触发方式都重置）
         async with self._counter_lock:
             self._counters[session_id] = 0
 
         if correction:
-            logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:80]}...")
+            logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:60]}...")
         else:
             logger.info("[ContentAudit] 审核完成，无需调整")
 
@@ -165,7 +200,7 @@ class ContentAuditLoop:
             return  # "无需调整"
 
         # 以 <system_WARNING> 格式注入
-        reminder = f"<system_WARNING>长下文已触发对话审核，请按照以下指示调整回复：{correction}</system_WARNING>"
+        reminder = f"<system_WARNING>上下文已触发对话审核规则，请按照以下指示调整回复：{correction}</system_WARNING>"
 
         if (
             hasattr(request, "extra_user_content_parts")
@@ -186,10 +221,16 @@ class ContentAuditLoop:
                 f"[ContentAudit] 已注入校正指示(system_prompt)到会话 {session_id}"
             )
 
-    # ---- 内部方法 ----
+        # ---- 内部方法 ----
 
-    def _fetch_recent_conversation(self, session_id: str) -> str:
-        """从 KCContextManager._session_chats 抓取最近 N 轮对话。
+    def _fetch_recent_conversation(
+        self, session_id: str, max_entries: int | None = None
+    ) -> str:
+        """从 KCContextManager._session_chats 抓取最近的消息。
+
+        Args:
+            session_id: 会话 ID
+            max_entries: 最多抓取的消息条数。None 则使用配置的 fetch_rounds * 2。
 
         复用 kc_context 的 _session_chats 数据格式。
         """
@@ -205,8 +246,8 @@ class ContentAuditLoop:
         if not entries:
             return ""
 
-        # 取最近 fetch_rounds * 2 条（用户+AI 各一条算一轮）
-        max_entries = self._fetch_rounds * 2
+        if max_entries is None:
+            max_entries = self._fetch_rounds * 2
         recent = entries[-max_entries:] if max_entries > 0 else entries
 
         lines: list[str] = []
