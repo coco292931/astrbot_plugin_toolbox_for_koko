@@ -209,7 +209,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.0",
+    "1.3.1",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):

@@ -30,14 +30,15 @@ DEFAULT_AUDIT_PROMPT = (
     "[待审核的对话]\n\n"
     "{conversation}\n\n"
     "---\n"
-    "请分析以上对话中 AI 的回复是否符合审核标准\n\n"
+    "请认真查看并分析以上对话中 AI 的回复是否符合审核标准\n\n"
     "输出格式：\n"
     "- 如果完全符合上述所有标准 → 回复：无需调整\n"
-    "- 如果存在任何不符合项 → 回复：调整方向:<简洁、清晰、可执行的校正指示，并说明“建议”还是“要求”>（例如：“建议使用更活泼的语气”“建议将‘我看看’改为‘让我看看汪~’”“删除括号内的‘像是’句式，只写动作‘（停了一下）’”）\n"
+    "- 如果存在任何不符合项 → 回复：调整方向:<简洁、清晰、可执行的校正指示，并说明“建议”还是“要求”>（例如：“建议使用更活泼的语气”“建议适当增加语气词”“后续回复中括号内不允许‘像是’句式，只写动作”“后续回复中禁止使用markdown”）\n"
     "- 如果无法判断或审核失败 → 回复：无法进行审核\n"
     "- 如果对话中用户有要求，则以用户要求为优先，临时更改、减弱或忽略部分调整项。\n"
     "- 矫正规则可以适当放宽，忽略轻微偏移，但若触发重点或禁止性规则，则必须说明。\n"
-    "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。"
+    "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。\n"
+    "- 矫正指示应当引导AI调整后续回复内容，但避免指出具体案例。"
 )
 
 
@@ -195,7 +196,7 @@ class ContentAuditLoop:
 
         logger.info(
             f"[ContentAudit] 会话 {session_id} 审核 LLM 返回: "
-            f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}"
+            f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}"
         )
 
         # 4. 存储结果
@@ -208,7 +209,7 @@ class ContentAuditLoop:
             logger.debug(f"[ContentAudit] 会话 {session_id} 计数器已重置")
 
         if correction:
-            logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:60]}...")
+            logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:20]}...")
         else:
             logger.info("[ContentAudit] 审核完成，无需调整")
 
