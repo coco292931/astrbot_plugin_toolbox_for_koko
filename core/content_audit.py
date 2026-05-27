@@ -126,9 +126,37 @@ class ContentAuditLoop:
             f"回复长度 {len(reply_text)}"
         )
 
-        # 判断是否为关键词触发
+        # ---- 第一步：计数器 +1（每次 AI 回复都增加，不论何种触发） ----
+        async with self._counter_lock:
+            current_count = self._counters.get(session_id, 0) + 1
+            self._counters[session_id] = current_count
+
+        logger.info(
+            f"[ContentAudit] 会话 {session_id} 消息计数: "
+            f"{current_count}/{self._audit_rounds}"
+        )
+
+        # ---- 第二步：检查保持位（每次都要检查） ----
+        should_trigger = False
+        trigger_reason = ""
+        has_pending = False
+
+        async with self._pending_keyword_lock:
+            has_pending = self._pending_keyword.pop(session_id, False)
+
+        if has_pending and current_count >= self._min_rounds:
+            # 保持位达标：触发审核
+            should_trigger = True
+            trigger_reason = "保持位触发"
+            logger.info(
+                f"[ContentAudit] 会话 {session_id} 保持位触发审核，"
+                f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
+            )
+
+        # ---- 第三步：判断是否为关键词触发 ----
         is_keyword_trigger = bool(
-            self._audit_keywords
+            not should_trigger
+            and self._audit_keywords
             and reply_text
             and any(kw in reply_text for kw in self._audit_keywords)
         )
@@ -139,70 +167,45 @@ class ContentAuditLoop:
                 f"回复: {reply_text[:60]}..."
             )
 
-        # ---- 轮数触发 / 关键词触发共享的审核路径 ----
-
-        # 获取当前计数（关键词触发不递增，直接取当前值）
-        async with self._counter_lock:
-            current_count = self._counters.get(session_id, 0)
-
-        # logger.debug(
-        #     f"[ContentAudit] 会话 {session_id} 当前计数={current_count}, "
-        #     f"is_keyword_trigger={is_keyword_trigger}, "
-        #     f"消息阈值={self._audit_rounds}"
-        # )
-
-        if not is_keyword_trigger:
-            # 轮数触发：递增计数器，检查阈值
-            current_count += 1
-            async with self._counter_lock:
-                self._counters[session_id] = current_count
-
-            logger.info(
-                f"[ContentAudit] 会话 {session_id} 消息计数: "
-                f"{current_count}/{self._audit_rounds}"
-            )
-
-            if current_count < self._audit_rounds:
-                logger.debug(f"[ContentAudit] 会话 {session_id} 未达阈值，跳过审核")
+        # ---- 第四步：决定是否触发审核 ----
+        if not should_trigger:
+            if is_keyword_trigger:
+                # 关键词触发：检查最小间隔
+                if current_count >= self._min_rounds:
+                    should_trigger = True
+                    trigger_reason = "关键词触发"
+                else:
+                    # 未达最小间隔，设保持位等待
+                    logger.info(
+                        f"[ContentAudit] 会话 {session_id} 关键词触发但当前计数 "
+                        f"{current_count} < 最小轮数 {self._min_rounds}，"
+                        f"设保持位等待下一轮"
+                    )
+                    async with self._pending_keyword_lock:
+                        self._pending_keyword[session_id] = True
+                    return
+            elif current_count >= self._audit_rounds:
+                # 轮数达阈值
+                should_trigger = True
+                trigger_reason = "达到消息阈值"
+            else:
+                # 未达任何触发条件
+                logger.debug(f"[ContentAudit] 会话 {session_id} 未达触发条件，跳过")
                 return
 
-        # 关键词触发 或 轮数已达阈值 → 执行审核
-        logger.info(
-            f"[ContentAudit] 会话 {session_id} "
-            f"{'关键词触发' if is_keyword_trigger else '达到消息阈值'}，开始审核..."
-        )
-
-        # ---- 最小间隔检查：关键词触发但未达最小轮数，设保持位等待下一轮 ----
-        if is_keyword_trigger and current_count < self._min_rounds:
-            logger.info(
-                f"[ContentAudit] 会话 {session_id} 关键词触发但当前计数 "
-                f"{current_count} < 最小轮数 {self._min_rounds}，"
-                f"设保持位等待下一轮"
-            )
-            async with self._pending_keyword_lock:
-                self._pending_keyword[session_id] = True
-            return
-
-        # ---- 检查保持位：上一轮关键词触发在等待，且当前计数已达标 ----
-        async with self._pending_keyword_lock:
-            has_pending = self._pending_keyword.pop(session_id, False)
-
-        if has_pending and current_count >= self._min_rounds:
-            is_keyword_trigger = True
-            logger.info(
-                f"[ContentAudit] 会话 {session_id} 保持位触发审核，"
-                f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
-            )
+        # ---- 执行审核 ----
+        logger.info(f"[ContentAudit] 会话 {session_id} {trigger_reason}，开始审核...")
 
         # 1. 将本次 AI 回复写入 _session_chats，确保审核 LLM 能看到
         self._append_reply_to_buffer(session_id, reply_text)
 
         # 2. 取最近的消息
-        #    - 关键词触发：取当前计数条（从上次重置到现在的所有消息）
+        #    - 关键词/保持位触发：取当前计数条（从上次重置到现在的所有消息）
         #    - 轮数触发 + 无后台任务：取配置的 fetch_rounds 轮
         #    - 轮数触发 + 有后台任务（连续触发）：从水印位置取到末尾，累积新消息
-        if is_keyword_trigger:
-            fetch_count = current_count + 1
+        is_kw_trigger = "关键词" in trigger_reason or "保持位" in trigger_reason
+        if is_kw_trigger:
+            fetch_count = current_count
         else:
             async with self._running_tasks_lock:
                 has_running_task = (
@@ -359,6 +362,14 @@ class ContentAuditLoop:
                         if prev and prev.strip():
                             last_correction = prev.strip()
 
+                    # 重置计数器并更新水印
+                    async with self._counter_lock:
+                        self._counters[session_id] = 0
+                    async with self._watermark_lock:
+                        self._watermarks[session_id] = self._get_buffer_length(
+                            session_id
+                        )
+
                     task = asyncio.create_task(
                         self._run_audit_task(
                             session_id=session_id,
@@ -398,6 +409,9 @@ class ContentAuditLoop:
         logger.debug(f"[ContentAudit] inject_to_request 被调用，会话 {session_id}")
 
         # 检查注入就绪标记（后台任务是否已完成）
+        # 原子操作：检查就绪标记 + 取出校正指示
+        correction = None
+        ready = False
         async with self._inject_ready_lock:
             ready = self._inject_ready.pop(session_id, False)
 
@@ -407,7 +421,6 @@ class ContentAuditLoop:
             )
             return
 
-        # 取出校正指示（后台已写入，直接 pop）
         async with self._correction_lock:
             correction = self._corrections.pop(session_id, None)
 
@@ -417,8 +430,13 @@ class ContentAuditLoop:
         )
 
         if correction is None:
-            logger.debug(f"[ContentAudit] 会话 {session_id} 无校正结果，跳过注入")
-            return  # 还没有审核结果
+            logger.warning(
+                f"[ContentAudit] 会话 {session_id} _inject_ready 为 True 但 _corrections 为空，"
+                f"恢复标记等待下次注入"
+            )
+            async with self._inject_ready_lock:
+                self._inject_ready[session_id] = True
+            return
         if not correction.strip():
             logger.debug(f"[ContentAudit] 会话 {session_id} 无需调整，跳过注入")
             return  # "无需调整"
