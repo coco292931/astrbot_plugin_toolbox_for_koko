@@ -64,7 +64,7 @@ class KCContextManager:
         # unified_msg_origin -> list[dict]
         self._session_chats: dict[str, list[dict]] = defaultdict(list)
         self._lock = asyncio.Lock()
-        # image_url -> (timestamp, caption)
+        # image file (MD5) -> (timestamp, caption)
         self._caption_cache: dict[str, tuple[float, str]] = {}
 
     # ---- 公开方法 ----
@@ -81,39 +81,44 @@ class KCContextManager:
         )
 
         parts: list[str] = []
-        image_urls: list[str] = []
+        image_infos: list[dict] = []  # 存 {"file": MD5文件名, "url": HTTP URL}
 
         for comp in event.get_messages():
             if isinstance(comp, Plain):
                 parts.append(comp.text)
             elif isinstance(comp, Image):
-                url = comp.url if comp.url else comp.file
-                if url:
-                    image_urls.append(url)
+                img_file = str(getattr(comp, "file", "") or "").strip()
+                img_url = str(getattr(comp, "url", "") or "").strip()
+                cache_key = img_file if img_file else img_url
+                image_infos.append(
+                    {"file": img_file, "url": img_url, "cache_key": cache_key}
+                )
                 parts.append("[Image]")
                 # ---------- 图片信息调试 ----------
                 logger.debug(
-                    f"[kc] Image component - url: {url[:80] if url else 'None'}, "
-                    f"file: {str(getattr(comp, 'file', ''))[:60]}, "
+                    f"[kc] Image component - "
+                    f"file: {img_file[:80]}, "
+                    f"url: {img_url[:80]}, "
                     f"path: {str(getattr(comp, 'path', ''))[:60]}, "
                     f"sub_type: {getattr(comp, 'sub_type', 'N/A')}, "
-                    f"comp_type: {type(comp).__name__}"
+                    f"cache_key: {cache_key[:80]}"
                 )
                 # ---------------------------------
             elif isinstance(comp, At):
                 parts.append(f"@{getattr(comp, 'name', '') or getattr(comp, 'qq', '')}")
 
         content = "".join(parts)
-        if not content and not image_urls:
-            return
 
         entry: dict[str, Any] = {
             "role": "user",
             "nickname": nickname,
             "time": now.strftime("%H:%M:%S"),
             "content": content.strip(),
-            "images": image_urls,
+            "images": image_infos,  # list[{"file": ..., "url": ..., "cache_key": ...}]
         }
+
+        if not content.strip() and not image_infos:
+            return
 
         async with self._lock:
             self._session_chats[umo].append(entry)
@@ -122,7 +127,7 @@ class KCContextManager:
                 self._session_chats[umo].pop(0)
 
         logger.debug(
-            f"[kc] 记录消息 - 会话: {umo}，内容: {content[:50]}...，图片数: {len(image_urls)}"
+            f"[kc] 记录消息 - 会话: {umo}，内容: {content[:50]}...，图片数: {len(image_infos)}"
         )
 
     async def record_reply(self, event: AstrMessageEvent, reply_text: str) -> None:
@@ -256,23 +261,38 @@ class KCContextManager:
                 continue
 
             captions: list[str] = []
-            for url in images:
+            for img_info in images:
                 if transcribed >= image_limit:
                     break
 
-                # ---------- 转述前图片 URL 调试 ----------
+                # img_info: {"file": ..., "url": ..., "cache_key": ...}
+                if isinstance(img_info, str):
+                    # 兼容旧数据格式（纯 URL），新存的是 dict
+                    cache_key = img_info
+                    img_url = img_info
+                else:
+                    cache_key = img_info.get("cache_key", "") or img_info.get(
+                        "file", ""
+                    )
+                    img_url = img_info.get("url", "") or cache_key
+
+                if not img_url:
+                    continue
+
+                # ---------- 转述前图片信息调试 ----------
                 logger.debug(
-                    f"[kc] 准备转述图片 - URL: {url[:100] if url else 'None'}, "
+                    f"[kc] 准备转述图片 - cache_key: {cache_key[:60]}, "
+                    f"url: {img_url[:80] if img_url else 'None'}, "
                     f"transcribed={transcribed}, image_limit={image_limit}"
                 )
                 # -----------------------------------------
 
-                # 查缓存
+                # 查缓存（以 file/MD5 为 key）
                 now_ts = datetime.now().timestamp()
-                cached = self._caption_cache.get(url)
+                cached = self._caption_cache.get(cache_key)
                 if cached and (now_ts - cached[0]) < self.IMAGE_CAPTION_TTL:
                     captions.append(cached[1])
-                    logger.debug(f"[kc] 图片转述命中缓存 - URL: {url[:40]}...")
+                    logger.debug(f"[kc] 图片转述命中缓存 - key: {cache_key[:40]}...")
                     continue
 
                 try:
@@ -289,20 +309,20 @@ class KCContextManager:
                         pass
                     caption = await provider.text_chat(
                         prompt=caption_prompt,
-                        image_urls=[url],
+                        image_urls=[img_url],
                         persist=False,
                     )
                     if caption and caption.completion_text:
                         caption_text = caption.completion_text.strip()
                         captions.append(caption_text)
-                        # 写入缓存
-                        self._caption_cache[url] = (now_ts, caption_text)
+                        # 写入缓存（以 cache_key 为 key）
+                        self._caption_cache[cache_key] = (now_ts, caption_text)
                     transcribed += 1
                 except Exception as e:
                     logger.debug(f"[kc] 图片转述失败（URL方式），尝试下载后重试: {e}")
                     # 降级：下载 → PIL 处理（GIF 取第一帧）→ 本地路径重试
                     try:
-                        local_path = await download_image_by_url(url)
+                        local_path = await download_image_by_url(img_url)
                         from PIL import Image as PILImage
 
                         with PILImage.open(local_path) as pil_img:
@@ -329,17 +349,21 @@ class KCContextManager:
                         if caption2 and caption2.completion_text:
                             caption_text = caption2.completion_text.strip()
                             captions.append(caption_text)
-                            self._caption_cache[url] = (now_ts, caption_text)
+                            self._caption_cache[cache_key] = (now_ts, caption_text)
                             transcribed += 1
-                            logger.info(f"[kc] 图片转述降级成功 - URL: {url[:40]}...")
+                            logger.info(
+                                f"[kc] 图片转述降级成功 - URL: {img_url[:40]}..."
+                            )
                         else:
                             raise Exception("降级转述返回空")
                     except Exception as e2:
                         logger.debug(f"[kc] 图片转述完全失败: {e2}")
                         captions.append("[图片]")
-                        logger.debug(f"[kc] 图片转述失败 - URL: {url}，错误: {str(e2)}")
+                        logger.debug(
+                            f"[kc] 图片转述失败 - URL: {img_url}，错误: {str(e2)}"
+                        )
                 logger.debug(
-                    f"[kc] 转述图片 - URL: {url}，描述: {captions[-1] if captions else None}"
+                    f"[kc] 转述图片 - URL: {img_url}，描述: {captions[-1] if captions else None}"
                 )
 
             if captions:
