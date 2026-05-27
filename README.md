@@ -117,12 +117,14 @@ astrbot_plugin_toolbox_for_koko/
 ### 📋 自动内容审核校正 (content_audit)
 
 自动审核 AI 回复质量，支持轮数触发和关键词触发两种方式。审核结果会在下一条用户消息时以 `<system_WARNING>` 标签注入，引导 LLM 调整回复风格。
+> 本功能与1.3.2更新为异步处理，审核llm回复后才插入用户消息当中，避免阻塞。
 
 - **content_audit_enabled**: 总开关。开启后每 N 条 AI 回复触发一次审核。
 - **content_audit_rounds**: 审核触发消息条数阈值（默认 5）。每 N 条 AI 回复触发一次审核。
 - **content_audit_fetch_rounds**: 审核时抓取的消息条数（默认 10）。
 - **content_audit_criteria**: 审核标准文本。定义 AI 回复应遵守的标准，LLM 将据此判断回复质量。
 - **content_audit_keywords**: 审核关键词列表（如 `["我不确定", "抱歉"]`）。AI 回复命中关键词时立即触发审核。
+- **content_audit_min_rounds**: 最小触发间隔轮数（默认 2）。两次审核之间最少间隔的轮数，避免刚审完又触发。设为 0 关闭。
 
 ## 🚀 智能化工具调用机制
 

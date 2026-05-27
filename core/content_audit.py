@@ -54,6 +54,7 @@ class ContentAuditLoop:
 
         # 配置
         self._audit_rounds: int = max(1, getattr(plugin, "content_audit_rounds", 5))
+        self._min_rounds: int = max(0, getattr(plugin, "content_audit_min_rounds", 2))
         self._fetch_rounds: int = max(
             1, getattr(plugin, "content_audit_fetch_rounds", 5)
         )
@@ -77,6 +78,26 @@ class ContentAuditLoop:
         #   其他   = 校正文本
         self._corrections: dict[str, str | None] = {}
         self._correction_lock = asyncio.Lock()
+
+        # session_id -> bool（注入就绪标记：后台审核已完成，可注入）
+        self._inject_ready: dict[str, bool] = {}
+        self._inject_ready_lock = asyncio.Lock()
+
+        # session_id -> asyncio.Task（当前正在运行的后台审核任务）
+        self._running_tasks: dict[str, asyncio.Task] = {}
+        self._running_tasks_lock = asyncio.Lock()
+
+        # session_id -> int（水印位置：记录上次审核触发时缓冲区消息数，用于连续触发时累积）
+        self._watermarks: dict[str, int] = {}
+        self._watermark_lock = asyncio.Lock()
+
+        # session_id -> list[bool]（审核请求队列占位：前一个完成后自动处理下一个）
+        self._audit_queue: dict[str, list[bool]] = {}
+        self._audit_queue_lock = asyncio.Lock()
+
+        # session_id -> bool（保持位：关键词触发但未达最小轮数，等待下一轮）
+        self._pending_keyword: dict[str, bool] = {}
+        self._pending_keyword_lock = asyncio.Lock()
 
     # ---- 公开方法 ----
 
@@ -151,16 +172,57 @@ class ContentAuditLoop:
             f"{'关键词触发' if is_keyword_trigger else '达到消息阈值'}，开始审核..."
         )
 
+        # ---- 最小间隔检查：关键词触发但未达最小轮数，设保持位等待下一轮 ----
+        if is_keyword_trigger and current_count < self._min_rounds:
+            logger.info(
+                f"[ContentAudit] 会话 {session_id} 关键词触发但当前计数 "
+                f"{current_count} < 最小轮数 {self._min_rounds}，"
+                f"设保持位等待下一轮"
+            )
+            async with self._pending_keyword_lock:
+                self._pending_keyword[session_id] = True
+            return
+
+        # ---- 检查保持位：上一轮关键词触发在等待，且当前计数已达标 ----
+        async with self._pending_keyword_lock:
+            has_pending = self._pending_keyword.pop(session_id, False)
+
+        if has_pending and current_count >= self._min_rounds:
+            is_keyword_trigger = True
+            logger.info(
+                f"[ContentAudit] 会话 {session_id} 保持位触发审核，"
+                f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
+            )
+
         # 1. 将本次 AI 回复写入 _session_chats，确保审核 LLM 能看到
         self._append_reply_to_buffer(session_id, reply_text)
 
         # 2. 取最近的消息
-        #    关键词触发：取当前计数条（从上次重置到现在的所有消息）
-        #    轮数触发：取配置的 fetch_rounds 轮（每轮 2 条消息），但不超过缓冲区实际数量
+        #    - 关键词触发：取当前计数条（从上次重置到现在的所有消息）
+        #    - 轮数触发 + 无后台任务：取配置的 fetch_rounds 轮
+        #    - 轮数触发 + 有后台任务（连续触发）：从水印位置取到末尾，累积新消息
         if is_keyword_trigger:
             fetch_count = current_count + 1
         else:
-            fetch_count = self._fetch_rounds * 2
+            async with self._running_tasks_lock:
+                has_running_task = (
+                    session_id in self._running_tasks
+                    and not self._running_tasks[session_id].done()
+                )
+            if has_running_task:
+                # 连续触发：从水印到缓冲区末尾
+                async with self._watermark_lock:
+                    watermark = self._watermarks.get(session_id, 0)
+                buffer_len = self._get_buffer_length(session_id)
+                fetch_count = buffer_len - watermark
+                if fetch_count < 1:
+                    fetch_count = self._fetch_rounds * 2  # 降级
+                logger.debug(
+                    f"[ContentAudit] 会话 {session_id} 连续触发，"
+                    f"水印={watermark}，缓冲区={buffer_len}，取 {fetch_count} 条"
+                )
+            else:
+                fetch_count = self._fetch_rounds * 2
 
         logger.debug(f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息")
         conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
@@ -174,44 +236,153 @@ class ContentAuditLoop:
             f"[ContentAudit] 会话 {session_id} 对话文本长度={len(conversation_text)}"
         )
 
-        # 2. 取上次校正方向
+        # 3. 取上次校正方向
         last_correction = ""
         async with self._correction_lock:
             prev = self._corrections.get(session_id)
             if prev and prev.strip():
                 last_correction = prev.strip()
-                logger.debug(
-                    f"[ContentAudit] 会话 {session_id} 有上次校正: {last_correction[:40]}..."
-                )
 
-        # 3. 调审核 LLM
-        logger.info(f"[ContentAudit] 会话 {session_id} 调用审核 LLM...")
+        # 检查是否已有运行中的后台任务
+        async with self._running_tasks_lock:
+            has_running = (
+                session_id in self._running_tasks
+                and not self._running_tasks[session_id].done()
+            )
+
+        if has_running:
+            # 有任务正在运行：只保留队列首位，后续触发自动合并（不累积无限队列）
+            async with self._audit_queue_lock:
+                if session_id not in self._audit_queue:
+                    # 队列为空，创建占位
+                    self._audit_queue[session_id] = [True]
+                    logger.info(
+                        f"[ContentAudit] 会话 {session_id} 有任务运行中，"
+                        f"审核请求入队等待"
+                    )
+                else:
+                    logger.debug(
+                        f"[ContentAudit] 会话 {session_id} 已有等待中的审核请求，合并"
+                    )
+            # 入队后仍然要重置计数器和水印
+            async with self._counter_lock:
+                self._counters[session_id] = 0
+            async with self._watermark_lock:
+                self._watermarks[session_id] = self._get_buffer_length(session_id)
+            return
+
+        # 无运行中任务：启动新后台任务
+        async with self._counter_lock:
+            self._counters[session_id] = 0
+        async with self._watermark_lock:
+            self._watermarks[session_id] = self._get_buffer_length(session_id)
+
+        logger.info(f"[ContentAudit] 会话 {session_id} 启动后台审核任务...")
+
+        task = asyncio.create_task(
+            self._run_audit_task(
+                session_id=session_id,
+                provider=provider,
+                conversation_text=conversation_text,
+                last_correction=last_correction,
+            )
+        )
+        async with self._running_tasks_lock:
+            self._running_tasks[session_id] = task
+
+    async def _run_audit_task(
+        self,
+        session_id: str,
+        provider: Any,
+        conversation_text: str,
+        last_correction: str,
+    ) -> None:
+        """后台审核任务：调用审核 LLM 并存储结果。"""
         try:
+            logger.info(f"[ContentAudit] 后台任务: 会话 {session_id} 调用审核 LLM...")
             correction = await self._call_audit_llm(
                 provider, conversation_text, last_correction
             )
+            logger.info(
+                f"[ContentAudit] 后台任务: 会话 {session_id} 审核 LLM 返回: "
+                f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}"
+            )
+
+            async with self._correction_lock:
+                self._corrections[session_id] = correction
+            async with self._inject_ready_lock:
+                self._inject_ready[session_id] = True
+
+            if correction:
+                logger.info(
+                    f"[ContentAudit] 后台任务: 会话 {session_id} "
+                    f"审核完成，校正指示: {correction[:20]}..."
+                )
+            else:
+                logger.info(
+                    f"[ContentAudit] 后台任务: 会话 {session_id} 审核完成，无需调整"
+                )
+        except asyncio.CancelledError:
+            logger.debug(f"[ContentAudit] 后台任务: 会话 {session_id} 被取消")
         except Exception as e:
-            logger.error(f"[ContentAudit] 审核 LLM 调用失败: {e}")
-            correction = None
+            logger.error(f"[ContentAudit] 后台任务: 会话 {session_id} 审核异常: {e}")
+        finally:
+            # 检查队列中是否有等待的审核请求（先读水印再清理）
+            has_next = False
+            async with self._audit_queue_lock:
+                if self._audit_queue.pop(session_id, None) is not None:
+                    has_next = True
 
-        logger.info(
-            f"[ContentAudit] 会话 {session_id} 审核 LLM 返回: "
-            f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}"
-        )
+            if has_next:
+                # 有等待的审核请求：先读水印再清理，基于水印取新消息启动下一个任务
+                async with self._watermark_lock:
+                    watermark = self._watermarks.get(session_id, 0)
+                    self._watermarks.pop(session_id, None)
+                logger.info(
+                    f"[ContentAudit] 后台任务: 会话 {session_id} "
+                    f"队列中有等待的审核请求，继续处理（水印={watermark}）..."
+                )
+                # 从缓冲区取水印到末尾的消息
+                buffer_len = self._get_buffer_length(session_id)
+                fetch_count = buffer_len - watermark
+                if fetch_count < 1:
+                    fetch_count = self._fetch_rounds * 2
 
-        # 4. 存储结果
-        async with self._correction_lock:
-            self._corrections[session_id] = correction
+                new_conversation = self._fetch_recent_conversation(
+                    session_id, fetch_count
+                )
+                if new_conversation:
+                    # 取上次校正方向
+                    last_correction = ""
+                    async with self._correction_lock:
+                        prev = self._corrections.get(session_id)
+                        if prev and prev.strip():
+                            last_correction = prev.strip()
 
-        # 5. 重置计数器（所有触发方式都重置）
-        async with self._counter_lock:
-            self._counters[session_id] = 0
-            logger.debug(f"[ContentAudit] 会话 {session_id} 计数器已重置")
+                    task = asyncio.create_task(
+                        self._run_audit_task(
+                            session_id=session_id,
+                            provider=provider,
+                            conversation_text=new_conversation,
+                            last_correction=last_correction,
+                        )
+                    )
+                    async with self._running_tasks_lock:
+                        self._running_tasks[session_id] = task
+                else:
+                    logger.warning(
+                        f"[ContentAudit] 后台任务: 会话 {session_id} "
+                        f"队列请求无可审核内容，跳过"
+                    )
+            else:
+                # 无队列请求，清理水印
+                async with self._watermark_lock:
+                    self._watermarks.pop(session_id, None)
 
-        if correction:
-            logger.info(f"[ContentAudit] 审核完成，校正指示: {correction[:20]}...")
-        else:
-            logger.info("[ContentAudit] 审核完成，无需调整")
+            # 清理运行中任务引用
+            async with self._running_tasks_lock:
+                if self._running_tasks.get(session_id) is asyncio.current_task():
+                    del self._running_tasks[session_id]
 
     async def inject_to_request(self, session_id: str, request: Any) -> None:
         """在下一条用户消息的 LLM 请求中注入校正指示（一次性）。
@@ -226,7 +397,17 @@ class ContentAuditLoop:
 
         logger.debug(f"[ContentAudit] inject_to_request 被调用，会话 {session_id}")
 
-        # 取出并清除（一次性）
+        # 检查注入就绪标记（后台任务是否已完成）
+        async with self._inject_ready_lock:
+            ready = self._inject_ready.pop(session_id, False)
+
+        if not ready:
+            logger.debug(
+                f"[ContentAudit] 会话 {session_id} 后台审核未完成或无需注入，跳过"
+            )
+            return
+
+        # 取出校正指示（后台已写入，直接 pop）
         async with self._correction_lock:
             correction = self._corrections.pop(session_id, None)
 
@@ -295,6 +476,16 @@ class ContentAuditLoop:
         logger.debug(
             f"[ContentAudit] 已写入本次回复到 _session_chats，会话 {session_id}"
         )
+
+    def _get_buffer_length(self, session_id: str) -> int:
+        """获取 _session_chats 中指定会话的当前消息数。"""
+        kc_context = getattr(self.plugin, "kc_context", None)
+        if not kc_context:
+            return 0
+        session_chats = getattr(kc_context, "_session_chats", None)
+        if not session_chats:
+            return 0
+        return len(session_chats.get(session_id, []))
 
     def _fetch_recent_conversation(
         self, session_id: str, max_entries: int | None = None

@@ -327,6 +327,17 @@
                     "type": "string"
                 },
                 "default": []
+            },
+            "content_audit_min_rounds": {
+                "description": "最小触发间隔轮数",
+                "hint": "两次审核之间最少间隔的轮数。避免刚审完又触发。默认为 2。设为 0 关闭。",
+                "type": "int",
+                "default": 2,
+                "slider": {
+                    "min": 0,
+                    "max": 20,
+                    "step": 1
+                }
             }
         }
     },
