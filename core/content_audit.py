@@ -242,7 +242,7 @@ class ContentAuditLoop:
             return  # "无需调整"
 
         # 以 <system_WARNING> 格式注入
-        reminder = f"<system_WARNING>上下文已触发对话审核规则，请按照以下指示调整回复：{correction}</system_WARNING>"
+        reminder = f"<system_WARNING>上下文内容已触发对话审核规则，请按照指示调整后续回复：{correction}</system_WARNING>"
 
         if (
             hasattr(request, "extra_user_content_parts")
