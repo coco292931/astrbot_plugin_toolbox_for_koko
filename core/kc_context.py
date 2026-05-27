@@ -91,6 +91,15 @@ class KCContextManager:
                 if url:
                     image_urls.append(url)
                 parts.append("[Image]")
+                # ---------- 图片信息调试 ----------
+                logger.debug(
+                    f"[kc] Image component - url: {url[:80] if url else 'None'}, "
+                    f"file: {str(getattr(comp, 'file', ''))[:60]}, "
+                    f"path: {str(getattr(comp, 'path', ''))[:60]}, "
+                    f"sub_type: {getattr(comp, 'sub_type', 'N/A')}, "
+                    f"comp_type: {type(comp).__name__}"
+                )
+                # ---------------------------------
             elif isinstance(comp, At):
                 parts.append(f"@{getattr(comp, 'name', '') or getattr(comp, 'qq', '')}")
 
@@ -250,6 +259,13 @@ class KCContextManager:
             for url in images:
                 if transcribed >= image_limit:
                     break
+
+                # ---------- 转述前图片 URL 调试 ----------
+                logger.debug(
+                    f"[kc] 准备转述图片 - URL: {url[:100] if url else 'None'}, "
+                    f"transcribed={transcribed}, image_limit={image_limit}"
+                )
+                # -----------------------------------------
 
                 # 查缓存
                 now_ts = datetime.now().timestamp()
