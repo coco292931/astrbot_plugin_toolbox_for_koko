@@ -564,6 +564,8 @@ class ContentAuditLoop:
             conversation=conversation_text,
         )
 
+        logger.debug("llm传入信息：\n" + prompt_text[:2000] + "\n---")
+
         try:
             resp = await provider.text_chat(
                 prompt=prompt_text,
