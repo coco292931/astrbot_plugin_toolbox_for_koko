@@ -200,32 +200,10 @@ class ContentAuditLoop:
         self._append_reply_to_buffer(session_id, reply_text)
 
         # 2. 取最近的消息
-        #    - 关键词/保持位触发：取当前计数条（从上次重置到现在的所有消息）
-        #    - 轮数触发 + 无后台任务：取配置的 fetch_rounds 轮
-        #    - 轮数触发 + 有后台任务（连续触发）：从水印位置取到末尾，累积新消息
-        is_kw_trigger = "关键词" in trigger_reason or "保持位" in trigger_reason
-        if is_kw_trigger:
-            fetch_count = current_count
-        else:
-            async with self._running_tasks_lock:
-                has_running_task = (
-                    session_id in self._running_tasks
-                    and not self._running_tasks[session_id].done()
-                )
-            if has_running_task:
-                # 连续触发：从水印到缓冲区末尾
-                async with self._watermark_lock:
-                    watermark = self._watermarks.get(session_id, 0)
-                buffer_len = self._get_buffer_length(session_id)
-                fetch_count = buffer_len - watermark
-                if fetch_count < 1:
-                    fetch_count = self._fetch_rounds * 2  # 降级
-                logger.debug(
-                    f"[ContentAudit] 会话 {session_id} 连续触发，"
-                    f"水印={watermark}，缓冲区={buffer_len}，取 {fetch_count} 条"
-                )
-            else:
-                fetch_count = self._fetch_rounds * 2
+        #    基于 current_count（距上次重置的 AI 回复次数）计算应取的总消息数。
+        #    每条 AI 回复对应 ~2 条总消息（用户消息 + AI 回复），
+        #    所以取 current_count * 2 条，最多不超过缓冲区实际数量。
+        fetch_count = current_count * 2
 
         logger.debug(f"[ContentAudit] 会话 {session_id} 取最近 {fetch_count} 条消息")
         conversation_text = self._fetch_recent_conversation(session_id, fetch_count)
