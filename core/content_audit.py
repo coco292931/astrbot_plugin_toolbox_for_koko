@@ -21,7 +21,7 @@ from astrbot.api import logger
 
 # 默认审核 LLM prompt
 DEFAULT_AUDIT_PROMPT = (
-    "请你作为AI回复质量分析员审核AI的回复是否符合以下标准，并给出调整方向（如果需要）。\n\n"
+    "请你作为AI回复质量分析员审核AI的回复是否符合以下标准，并分点给出调整方向（如果需要）。\n\n"
     "[审核标准]\n"
     "{criteria}\n\n"
     "[前次调整方向]\n"
@@ -157,16 +157,15 @@ class ContentAuditLoop:
             )
 
         # ---- 第三步：判断是否为关键词触发 ----
-        is_keyword_trigger = bool(
-            not should_trigger
-            and self._audit_keywords
-            and reply_text
-            and any(kw in reply_text for kw in self._audit_keywords)
-        )
+        matched_keywords: list[str] = []
+        if not should_trigger and self._audit_keywords and reply_text:
+            matched_keywords = [kw for kw in self._audit_keywords if kw in reply_text]
+        is_keyword_trigger = bool(matched_keywords)
 
         if is_keyword_trigger:
             logger.info(
                 f"[ContentAudit] 关键词触发审核，会话 {session_id}，"
+                f"匹配关键词: {matched_keywords}，"
                 f"回复: {reply_text[:60]}..."
             )
 
@@ -287,7 +286,7 @@ class ContentAuditLoop:
             )
             logger.info(
                 f"[ContentAudit] 后台任务: 会话 {session_id} 审核 LLM 返回: "
-                f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}"
+                f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}..."
             )
 
             async with self._correction_lock:
@@ -405,7 +404,7 @@ class ContentAuditLoop:
 
         logger.debug(
             f"[ContentAudit] 会话 {session_id} 取出校正: "
-            f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}"
+            f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}..."
         )
 
         if correction is None:
