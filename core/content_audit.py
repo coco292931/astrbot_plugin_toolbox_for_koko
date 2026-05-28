@@ -236,7 +236,8 @@ class ContentAuditLoop:
             return
 
         logger.debug(
-            f"[ContentAudit] 会话 {session_id} 对话文本长度={len(conversation_text)}"
+            f"[ContentAudit] 会话 {session_id} 对话文本长度={len(conversation_text)}\n"
+            f"对话内容: {conversation_text[:200]}..."
         )
 
         # 3. 取上次校正方向
