@@ -126,7 +126,10 @@ class ContentAuditLoop:
             f"回复长度 {len(reply_text)}"
         )
 
-        # ---- 第一步：计数器 +1（每次 AI 回复都增加，不论何种触发） ----
+        # ---- 第一步：将本次 AI 回复写入 _session_chats（每次必写，确保上下文完整） ----
+        self._append_reply_to_buffer(session_id, reply_text)
+
+        # ---- 第二步：计数器 +1（每次 AI 回复都增加，不论何种触发） ----
         async with self._counter_lock:
             current_count = self._counters.get(session_id, 0) + 1
             self._counters[session_id] = current_count
@@ -187,7 +190,7 @@ class ContentAuditLoop:
             elif current_count >= self._audit_rounds:
                 # 轮数达阈值
                 should_trigger = True
-                trigger_reason = "达到消息阈值"
+                trigger_reason = "达到消息阈值，触发审核"
             else:
                 # 未达任何触发条件
                 logger.debug(f"[ContentAudit] 会话 {session_id} 未达触发条件，跳过")
@@ -196,10 +199,7 @@ class ContentAuditLoop:
         # ---- 执行审核 ----
         logger.info(f"[ContentAudit] 会话 {session_id} {trigger_reason}，开始审核...")
 
-        # 1. 将本次 AI 回复写入 _session_chats，确保审核 LLM 能看到
-        self._append_reply_to_buffer(session_id, reply_text)
-
-        # 2. 取最近的消息
+        # 2. 取最近的消息（上一步 _append_reply_to_buffer 已在开头执行）
         #    基于 current_count（距上次重置的 AI 回复次数）计算应取的总消息数。
         #    每条 AI 回复对应 ~2 条总消息（用户消息 + AI 回复），
         #    所以取 current_count * 2 条，最多不超过缓冲区实际数量。
@@ -215,7 +215,7 @@ class ContentAuditLoop:
 
         logger.debug(
             f"[ContentAudit] 会话 {session_id} 对话文本长度={len(conversation_text)}\n"
-            f"对话内容: {conversation_text[:200]}..."
+            f"对话内容: {conversation_text[:60]}..."
         )
 
         # 3. 取上次校正方向
@@ -542,7 +542,11 @@ class ContentAuditLoop:
             conversation=conversation_text,
         )
 
-        logger.debug("llm传入信息：\n" + prompt_text[:2000] + "\n---")
+        logger.debug(
+            "传入审核 LLM 信息：\n"
+            f"{DEFAULT_AUDIT_PROMPT.format(criteria=self._criteria[:100], last_correction=last_correction[:50] or '无', conversation=conversation_text)}\n"
+            "\n---"
+        )
 
         try:
             resp = await provider.text_chat(
