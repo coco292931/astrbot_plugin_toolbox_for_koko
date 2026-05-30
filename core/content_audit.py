@@ -418,7 +418,13 @@ class ContentAuditLoop:
 
         reminder = f"<system_WARNING>上下文内容已触发对话审核规则，请按照指示调整后续回复：{correction}</system_WARNING>"
 
-        if (
+        if hasattr(request, "system_prompt") and request.system_prompt:
+            # 追加到 system_prompt，与 Mnemosyne 的 memory_inject 注入方式一致
+            request.system_prompt += f"\n\n{reminder}"
+            logger.info(
+                f"[ContentAudit] 已注入校正指示(system_prompt)到 key={key}"
+            )
+        elif (
             hasattr(request, "extra_user_content_parts")
             and request.extra_user_content_parts
         ):
@@ -426,13 +432,15 @@ class ContentAuditLoop:
                 request.extra_user_content_parts.append(
                     type(request.extra_user_content_parts[0])(text=reminder)
                 )
-                logger.info(f"[ContentAudit] 已注入校正指示到 key={key}")
+                logger.info(f"[ContentAudit] 已注入校正指示(extra)到 key={key}")
             except Exception as e:
-                logger.debug(f"[ContentAudit] 注入校正指示失败: {e}")
-        elif hasattr(request, "system_prompt"):
-            request.system_prompt += f"\n{reminder}\n"
+                logger.debug(f"[ContentAudit] 注入校正指示(extra)失败: {e}")
+        elif hasattr(request, "prompt"):
+            # 最终回退：直接附加到 prompt 尾部
+            current_prompt = request.prompt if isinstance(request.prompt, str) else ""
+            request.prompt = current_prompt + f"\n\n{reminder}"
             logger.info(
-                f"[ContentAudit] 已注入校正指示(system_prompt)到 key={key}"
+                f"[ContentAudit] 已注入校正指示(prompt)到 key={key}"
             )
 
         # ---- 内部方法 ----
