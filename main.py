@@ -196,6 +196,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "content_audit_min_rounds",
             "content_audit_criteria",
             "content_audit_keywords",
+            "content_audit_debug",
         ):
             if key in content_audit_cfg:
                 incoming[key] = content_audit_cfg.get(key)
@@ -317,6 +318,9 @@ class ToolboxPlugin(Star):
         ).strip()
         self.content_audit_keywords = self._parse_keywords(
             self.config.get("content_audit_keywords", [])
+        )
+        self.content_audit_debug = self._safe_bool(
+            self.config.get("content_audit_debug", False), False
         )
         logger.debug(
             f"[content_audit] __init__ 实例化条件: "

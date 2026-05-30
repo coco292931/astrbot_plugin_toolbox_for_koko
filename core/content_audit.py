@@ -77,6 +77,11 @@ class ContentAuditLoop:
         if not isinstance(self._audit_keywords, list):
             self._audit_keywords = []
 
+        # 调试日志开关
+        self._debug_enabled: bool = bool(
+            getattr(plugin, "content_audit_debug", False)
+        )
+
         # session_id -> int（消息计数器）
         self._counters: dict[str, int] = {}
         self._counter_lock = asyncio.Lock()
@@ -134,10 +139,10 @@ class ContentAuditLoop:
         """
         key = await self._make_key(event)
         if not key:
-            logger.debug("[ContentAudit] 跳过: 无法生成 key")
+            self._log_debug("[ContentAudit] 跳过: 无法生成 key")
             return
         if not provider:
-            logger.debug("[ContentAudit] 跳过: provider 为空")
+            self._log_debug("[ContentAudit] 跳过: provider 为空")
             return
 
         # ---- 第零步：记录用户消息到 _audit_chats ----
@@ -211,7 +216,7 @@ class ContentAuditLoop:
                 should_trigger = True
                 trigger_reason = "达到消息阈值，触发审核"
             else:
-                logger.debug(f"[ContentAudit] key={key} 未达触发条件，跳过")
+                self._log_debug(f"[ContentAudit] key={key} 未达触发条件，跳过")
                 return
 
         logger.info(f"[ContentAudit] key={key} {trigger_reason}，开始审核...")
@@ -244,7 +249,7 @@ class ContentAuditLoop:
                 if key not in self._audit_queue:
                     self._audit_queue[key] = [True]
                 else:
-                    logger.debug(f"[ContentAudit] key={key} 已有等待中的审核请求，合并")
+                    self._log_debug(f"[ContentAudit] key={key} 已有等待中的审核请求，合并")
             async with self._counter_lock:
                 self._counters[key] = 0
             async with self._watermark_lock:
@@ -302,7 +307,7 @@ class ContentAuditLoop:
                     f"[ContentAudit] 后台任务: 会话 {session_id} 审核完成，无需调整"
                 )
         except asyncio.CancelledError:
-            logger.debug(f"[ContentAudit] 后台任务: 会话 {session_id} 被取消")
+            self._log_debug(f"[ContentAudit] 后台任务: 会话 {session_id} 被取消")
         except Exception as e:
             logger.error(f"[ContentAudit] 后台任务: 会话 {session_id} 审核异常: {e}")
         finally:
@@ -380,10 +385,10 @@ class ContentAuditLoop:
         """
         key = await self._make_key(event)
         if not key:
-            logger.debug("[ContentAudit] inject_to_request 跳过: 无法生成 key")
+            self._log_debug("[ContentAudit] inject_to_request 跳过: 无法生成 key")
             return
 
-        logger.debug(f"[ContentAudit] inject_to_request 被调用，key={key}")
+        self._log_debug(f"[ContentAudit] inject_to_request 被调用，key={key}")
 
         correction = None
         ready = False
@@ -391,15 +396,13 @@ class ContentAuditLoop:
             ready = self._inject_ready.pop(key, False)
 
         if not ready:
-            logger.debug(
-                f"[ContentAudit] key={key} 后台审核未完成或无需注入，跳过"
-            )
+            self._log_debug(f"[ContentAudit] key={key} 后台审核未完成或无需注入，跳过")
             return
 
         async with self._correction_lock:
             correction = self._corrections.pop(key, None)
 
-        logger.debug(
+        self._log_debug(
             f"[ContentAudit] key={key} 取出校正: "
             f"{'None' if correction is None else ('空' if correction == '' else correction[:60])}..."
         )
@@ -413,7 +416,7 @@ class ContentAuditLoop:
                 self._inject_ready[key] = True
             return
         if not correction.strip():
-            logger.debug(f"[ContentAudit] key={key} 无需调整，跳过注入")
+            self._log_debug(f"[ContentAudit] key={key} 无需调整，跳过注入")
             return
 
         reminder = f"<system_WARNING>上下文内容已触发对话审核规则，请按照指示调整后续回复：{correction}</system_WARNING>"
@@ -434,7 +437,7 @@ class ContentAuditLoop:
                 )
                 logger.info(f"[ContentAudit] 已注入校正指示(extra)到 key={key}")
             except Exception as e:
-                logger.debug(f"[ContentAudit] 注入校正指示(extra)失败: {e}")
+                self._log_debug(f"[ContentAudit] 注入校正指示(extra)失败: {e}")
         elif hasattr(request, "prompt"):
             # 最终回退：直接附加到 prompt 尾部
             current_prompt = request.prompt if isinstance(request.prompt, str) else ""
@@ -444,6 +447,11 @@ class ContentAuditLoop:
             )
 
         # ---- 内部方法 ----
+
+    def _log_debug(self, msg: str) -> None:
+        """仅在 content_audit_debug 开启时输出 debug 日志。"""
+        if self._debug_enabled:
+            logger.debug(msg)
 
     async def _append_reply_to_buffer(self, key: str, reply_text: str) -> None:
         """将本次 AI 回复写入 _audit_chats。"""
@@ -543,7 +551,7 @@ class ContentAuditLoop:
             conversation=conversation_text,
         )
 
-        logger.debug(
+        self._log_debug(
             "传入审核 LLM 信息：\n"
             f"{DEFAULT_AUDIT_PROMPT.format(criteria=self._criteria[:100], last_correction=last_correction[:50] or '无', conversation=conversation_text)}\n"
             "\n---"
@@ -596,7 +604,7 @@ class ContentAuditLoop:
                 if cid and isinstance(cid, str) and cid.strip():
                     return cid.strip()
         except Exception as e:
-            logger.debug(f"[ContentAudit] 获取 conversation_id 失败: {e}")
+            self._log_debug(f"[ContentAudit] 获取 conversation_id 失败: {e}")
         return None
 
     async def _make_key(self, event: AstrMessageEvent) -> str | None:

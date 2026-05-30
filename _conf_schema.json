@@ -338,6 +338,12 @@
                     "max": 20,
                     "step": 1
                 }
+            },
+            "content_audit_debug": {
+                "description": "开启调试日志",
+                "hint": "开启后，logger.debug 级别的调试信息将打印到控制台。",
+                "type": "bool",
+                "default": false
             }
         }
     },
