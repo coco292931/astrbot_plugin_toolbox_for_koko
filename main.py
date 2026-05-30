@@ -210,7 +210,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.6",
+    "1.3.7",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2074,7 +2074,7 @@ class ToolboxPlugin(Star):
             if audit_loop:
                 try:
                     await audit_loop.inject_to_request(
-                        event.unified_msg_origin, request
+                        event, request
                     )
                 except Exception as e:
                     logger.debug(f"[content_audit] 注入校正指示失败: {e}")
@@ -2110,7 +2110,7 @@ class ToolboxPlugin(Star):
                         #     f"provider={'有' if provider else '无'}"
                         # )
                         await audit_loop.on_ai_reply(
-                            event.unified_msg_origin,
+                            event,
                             reply_text,
                             provider,
                         )
