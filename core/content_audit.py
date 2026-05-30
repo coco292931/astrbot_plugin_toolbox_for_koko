@@ -30,7 +30,7 @@ DEFAULT_AUDIT_PROMPT = (
     "[待审核的对话]\n\n"
     "{conversation}\n\n"
     "---\n"
-    "请认真查看并分析以上对话中 AI 的回复是否符合审核标准\n\n"
+    "请认真查看并分析以上对话中 AI 的回复是否符合审核标准，并相较于上一次是否有改正趋势\n\n"
     "输出格式：\n"
     "- 如果完全符合上述所有标准 → 回复：无需调整\n"
     "- 如果存在任何不符合项 → 回复：调整方向:<简洁、清晰、可执行的校正指示，并说明“建议”还是“要求”>（例如：“建议使用更活泼的语气”“建议适当增加语气词”“后续回复中括号内不允许‘像是’句式，只写动作”“后续回复中禁止使用markdown”）\n"
@@ -78,6 +78,10 @@ class ContentAuditLoop:
         #   其他   = 校正文本
         self._corrections: dict[str, str | None] = {}
         self._correction_lock = asyncio.Lock()
+
+        # session_id -> str | None（上次校正方向，供下次审核 LLM 参考，不被 inject 消费）
+        self._last_corrections: dict[str, str | None] = {}
+        self._last_correction_lock = asyncio.Lock()
 
         # session_id -> bool（注入就绪标记：后台审核已完成，可注入）
         self._inject_ready: dict[str, bool] = {}
@@ -217,10 +221,10 @@ class ContentAuditLoop:
             f"对话内容: {conversation_text[:60]}..."
         )
 
-        # 3. 取上次校正方向
+        # 3. 取上次校正方向（从 _last_corrections 读，不受 inject_to_request 影响）
         last_correction = ""
-        async with self._correction_lock:
-            prev = self._corrections.get(session_id)
+        async with self._last_correction_lock:
+            prev = self._last_corrections.get(session_id)
             if prev and prev.strip():
                 last_correction = prev.strip()
 
@@ -293,6 +297,8 @@ class ContentAuditLoop:
                 self._corrections[session_id] = correction
             async with self._inject_ready_lock:
                 self._inject_ready[session_id] = True
+            async with self._last_correction_lock:
+                self._last_corrections[session_id] = correction
 
             if correction:
                 logger.info(
@@ -333,10 +339,10 @@ class ContentAuditLoop:
                     session_id, fetch_count
                 )
                 if new_conversation:
-                    # 取上次校正方向
+                    # 取上次校正方向（从 _last_corrections 读，不受 inject_to_request 影响）
                     last_correction = ""
-                    async with self._correction_lock:
-                        prev = self._corrections.get(session_id)
+                    async with self._last_correction_lock:
+                        prev = self._last_corrections.get(session_id)
                         if prev and prev.strip():
                             last_correction = prev.strip()
 
