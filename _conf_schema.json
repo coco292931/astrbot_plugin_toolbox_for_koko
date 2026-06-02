@@ -347,6 +347,36 @@
             }
         }
     },
+    "persona_audit": {
+        "description": "人格遵循审核",
+        "type": "object",
+        "hint": "审核 AI 回复是否遵循了设定的人格特征。与内容审核并行运行，各自独立计数和存储。",
+        "items": {
+            "persona_audit_enabled": {
+                "description": "启用人格遵循审核",
+                "hint": "开启后，每 N 轮对话审核 AI 回复是否符合人格设定，如有偏离则在下条用户消息时注入校正指示。",
+                "type": "bool",
+                "default": false
+            },
+            "persona_audit_rounds": {
+                "description": "审核触发轮数",
+                "hint": "每多少轮对话（一问一答=1轮）触发一次人格审核。建议 5-10。",
+                "type": "int",
+                "default": 5,
+                "slider": {
+                    "min": 0,
+                    "max": 50,
+                    "step": 1
+                }
+            },
+            "persona_audit_prompt": {
+                "description": "AI 人格设定",
+                "hint": "定义 AI 应遵守的人格特征描述。LLM 将据此审核回复是否符合人格。",
+                "type": "string",
+                "default": "你是一个可爱、友善的助手，说话语气温柔，使用口语化表达。"
+            }
+        }
+    },
     "image_caption": {
         "description": "图片转述回退（补充 AstrBot 图片处理）",
         "type": "object",

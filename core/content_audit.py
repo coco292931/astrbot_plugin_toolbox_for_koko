@@ -47,7 +47,25 @@ DEFAULT_AUDIT_PROMPT = (
     "{conversation}\n\n"
     "---\n"
     "请认真查看并逐条分析以上对话中 AI 的回复是否符合审核标准，并向ai给出改进建议\n\n"
-    
+)
+
+# 默认人格遵循审核 LLM prompt
+DEFAULT_PERSONA_AUDIT_PROMPT = (
+    "请你作为AI角色扮演审核员，审核AI的回复是否符合其设定的人格特征。\n\n"
+    "输出格式：\n"
+    "- 如果AI的回复完全符合所设定人格 → 回复：无需调整\n"
+    "- 如果任何方面不符合人格设定 → 回复：调整方向:<简洁、清晰的校正指示>（例如：“建议使用更温柔的语气”“建议增加口语化表达”“建议减少正式用语”）\n"
+    "- 如果无法判断 → 回复：无法进行审核\n"
+    "- 如果对话中用户明确要求AI改变风格，则以用户要求为优先。\n\n"
+    "[AI人格设定]\n"
+    "{persona_prompt}\n\n"
+    "[前次调整方向]\n"
+    "{last_correction}\n\n"
+    "---\n"
+    "[待审核的对话]\n\n"
+    "{conversation}\n\n"
+    "---\n"
+    "请认真审核以上对话中AI的回复是否符合人格设定，逐条分析，并给出改进建议。"
 )
 
 
@@ -77,11 +95,19 @@ class ContentAuditLoop:
         if not isinstance(self._audit_keywords, list):
             self._audit_keywords = []
 
-        # 调试日志开关
-        self._debug_enabled: bool = bool(
-            getattr(plugin, "content_audit_debug", False)
+        # ---- 人格遵循审核配置 ----
+        self._persona_audit_enabled: bool = bool(
+            getattr(plugin, "persona_audit_enabled", False)
         )
+        self._persona_audit_rounds: int = max(
+            1, getattr(plugin, "persona_audit_rounds", 5)
+        )
+        self._persona_prompt: str = getattr(plugin, "persona_audit_prompt", "") or ""
 
+        # 调试日志开关
+        self._debug_enabled: bool = bool(getattr(plugin, "content_audit_debug", False))
+
+        # ---- 内容审核状态（原有） ----
         # session_id -> int（消息计数器）
         self._counters: dict[str, int] = {}
         self._counter_lock = asyncio.Lock()
@@ -117,6 +143,22 @@ class ContentAuditLoop:
         self._pending_keyword: dict[str, bool] = {}
         self._pending_keyword_lock = asyncio.Lock()
 
+        # ---- 人格遵循审核状态（独立于内容审核） ----
+        self._pa_counters: dict[str, int] = {}
+        self._pa_counter_lock = asyncio.Lock()
+        self._pa_corrections: dict[str, str | None] = {}
+        self._pa_correction_lock = asyncio.Lock()
+        self._pa_last_corrections: dict[str, str | None] = {}
+        self._pa_last_correction_lock = asyncio.Lock()
+        self._pa_inject_ready: dict[str, bool] = {}
+        self._pa_inject_ready_lock = asyncio.Lock()
+        self._pa_running_tasks: dict[str, asyncio.Task] = {}
+        self._pa_running_tasks_lock = asyncio.Lock()
+        self._pa_watermarks: dict[str, int] = {}
+        self._pa_watermark_lock = asyncio.Lock()
+        self._pa_audit_queue: dict[str, list[bool]] = {}
+        self._pa_audit_queue_lock = asyncio.Lock()
+
         # ---- 审计专用的对话上下文缓冲区（不依赖 KCContextManager._session_chats） ----
         # key = f"{umo}:{cid}"，同一对话的 user/assistant 消息混在一起
         self._audit_chats: dict[str, list[dict]] = {}
@@ -151,8 +193,7 @@ class ContentAuditLoop:
             await self._audit_record_message(key, "user", user_message_text, event)
 
         logger.info(
-            f"[ContentAudit] on_ai_reply 被调用，key={key}，"
-            f"回复长度 {len(reply_text)}"
+            f"[ContentAudit] on_ai_reply 被调用，key={key}，回复长度 {len(reply_text)}"
         )
 
         # ---- 第一步：将本次 AI 回复写入 _audit_chats ----
@@ -164,8 +205,7 @@ class ContentAuditLoop:
             self._counters[key] = current_count
 
         logger.info(
-            f"[ContentAudit] key={key} 消息计数: "
-            f"{current_count}/{self._audit_rounds}"
+            f"[ContentAudit] key={key} 消息计数: {current_count}/{self._audit_rounds}"
         )
 
         # ---- 第三步：检查保持位（每次都要检查） ----
@@ -240,8 +280,7 @@ class ContentAuditLoop:
         # 检查是否已有运行中的后台任务
         async with self._running_tasks_lock:
             has_running = (
-                key in self._running_tasks
-                and not self._running_tasks[key].done()
+                key in self._running_tasks and not self._running_tasks[key].done()
             )
 
         if has_running:
@@ -249,7 +288,9 @@ class ContentAuditLoop:
                 if key not in self._audit_queue:
                     self._audit_queue[key] = [True]
                 else:
-                    self._log_debug(f"[ContentAudit] key={key} 已有等待中的审核请求，合并")
+                    self._log_debug(
+                        f"[ContentAudit] key={key} 已有等待中的审核请求，合并"
+                    )
             async with self._counter_lock:
                 self._counters[key] = 0
             async with self._watermark_lock:
@@ -424,9 +465,7 @@ class ContentAuditLoop:
         if hasattr(request, "system_prompt") and request.system_prompt:
             # 追加到 system_prompt，与 Mnemosyne 的 memory_inject 注入方式一致
             request.system_prompt += f"\n\n{reminder}"
-            logger.info(
-                f"[ContentAudit] 已注入校正指示(system_prompt)到 key={key}"
-            )
+            logger.info(f"[ContentAudit] 已注入校正指示(system_prompt)到 key={key}")
         elif (
             hasattr(request, "extra_user_content_parts")
             and request.extra_user_content_parts
@@ -442,11 +481,287 @@ class ContentAuditLoop:
             # 最终回退：直接附加到 prompt 尾部
             current_prompt = request.prompt if isinstance(request.prompt, str) else ""
             request.prompt = current_prompt + f"\n\n{reminder}"
-            logger.info(
-                f"[ContentAudit] 已注入校正指示(prompt)到 key={key}"
+            logger.info(f"[ContentAudit] 已注入校正指示(prompt)到 key={key}")
+
+        # === 第二部分：人格遵循审核注入 ===
+        pa_correction = None
+        pa_ready = False
+        async with self._pa_inject_ready_lock:
+            pa_ready = self._pa_inject_ready.pop(key, False)
+
+        if pa_ready:
+            async with self._pa_correction_lock:
+                pa_correction = self._pa_corrections.pop(key, None)
+
+            if pa_correction is None:
+                logger.warning(
+                    f"[PersonaAudit] key={key} _pa_inject_ready 为 True 但 _pa_corrections 为空，"
+                    f"恢复标记等待下次注入"
+                )
+                async with self._pa_inject_ready_lock:
+                    self._pa_inject_ready[key] = True
+            elif pa_correction.strip():
+                pa_reminder = f"<system_WARNING>上下文内容已触发人格遵循审核，请按照指示调整后续回复：{pa_correction}</system_WARNING>"
+
+                if hasattr(request, "system_prompt") and request.system_prompt:
+                    request.system_prompt += f"\n\n{pa_reminder}"
+                    logger.info(
+                        f"[PersonaAudit] 已注入校正指示(system_prompt)到 key={key}"
+                    )
+                elif (
+                    hasattr(request, "extra_user_content_parts")
+                    and request.extra_user_content_parts
+                ):
+                    try:
+                        request.extra_user_content_parts.append(
+                            type(request.extra_user_content_parts[0])(text=pa_reminder)
+                        )
+                        logger.info(f"[PersonaAudit] 已注入校正指示(extra)到 key={key}")
+                    except Exception as e:
+                        self._log_debug(f"[PersonaAudit] 注入校正指示(extra)失败: {e}")
+                elif hasattr(request, "prompt"):
+                    current_prompt = (
+                        request.prompt if isinstance(request.prompt, str) else ""
+                    )
+                    request.prompt = current_prompt + f"\n\n{pa_reminder}"
+                    logger.info(f"[PersonaAudit] 已注入校正指示(prompt)到 key={key}")
+            else:
+                self._log_debug(f"[PersonaAudit] key={key} 无需调整，跳过注入")
+
+    # ---- 人格遵循审核入口 ----
+
+    async def on_ai_reply_persona(
+        self,
+        event: AstrMessageEvent,
+        reply_text: str,
+        provider: Any,
+    ) -> None:
+        """人格遵循审核入口，与 on_ai_reply 并行调用。
+
+        与内容审核共享 _audit_chats 缓冲区，但使用独立的 _pa_ 状态变量。
+        无人格关键词触发逻辑，仅有轮数触发。
+        """
+        if not self._persona_audit_enabled:
+            return
+        if not self._persona_prompt:
+            return
+
+        key = await self._make_key(event)
+        if not key:
+            return
+        if not provider:
+            return
+
+        # 用户消息已由 on_ai_reply 写入 _audit_chats，无需重复写入
+        # AI 回复也已由 on_ai_reply 写入 _audit_chats，无需重复写入
+
+        # 计数器 +1
+        async with self._pa_counter_lock:
+            current_count = self._pa_counters.get(key, 0) + 1
+            self._pa_counters[key] = current_count
+
+        # 检查是否达到轮数阈值（仅轮数触发，无关键词）
+        if current_count < self._persona_audit_rounds:
+            self._log_debug(
+                f"[PersonaAudit] key={key} 未达触发条件 ({current_count}/{self._persona_audit_rounds})，跳过"
+            )
+            return
+
+        logger.info(f"[PersonaAudit] key={key} 达到轮数阈值，开始审核...")
+
+        fetch_count = current_count * 2
+        conversation_text = await self._fetch_recent_conversation(key, fetch_count)
+        if not conversation_text:
+            logger.warning("[PersonaAudit] 无可审核的对话内容，跳过")
+            async with self._pa_counter_lock:
+                self._pa_counters[key] = 0
+            return
+
+        # 取上次校正方向
+        last_correction = ""
+        async with self._pa_last_correction_lock:
+            prev = self._pa_last_corrections.get(key)
+            if prev and prev.strip():
+                last_correction = prev.strip()
+
+        # 检查是否有运行中的后台任务
+        async with self._pa_running_tasks_lock:
+            has_running = (
+                key in self._pa_running_tasks and not self._pa_running_tasks[key].done()
             )
 
-        # ---- 内部方法 ----
+        if has_running:
+            async with self._pa_audit_queue_lock:
+                if key not in self._pa_audit_queue:
+                    self._pa_audit_queue[key] = [True]
+                else:
+                    self._log_debug(
+                        f"[PersonaAudit] key={key} 已有等待中的审核请求，合并"
+                    )
+            async with self._pa_counter_lock:
+                self._pa_counters[key] = 0
+            async with self._pa_watermark_lock:
+                self._pa_watermarks[key] = await self._get_buffer_length(key)
+            return
+
+        async with self._pa_counter_lock:
+            self._pa_counters[key] = 0
+        async with self._pa_watermark_lock:
+            self._pa_watermarks[key] = await self._get_buffer_length(key)
+
+        task = asyncio.create_task(
+            self._run_pa_audit_task(
+                session_id=key,
+                provider=provider,
+                conversation_text=conversation_text,
+                last_correction=last_correction,
+            )
+        )
+        async with self._pa_running_tasks_lock:
+            self._pa_running_tasks[key] = task
+
+    async def _run_pa_audit_task(
+        self,
+        session_id: str,
+        provider: Any,
+        conversation_text: str,
+        last_correction: str,
+    ) -> None:
+        """人格审核后台任务：调用审核 LLM 并存储结果。"""
+        try:
+            logger.info(f"[PersonaAudit] 后台任务: 会话 {session_id} 调用审核 LLM...")
+            correction = await self._call_persona_audit_llm(
+                provider, conversation_text, last_correction
+            )
+            logger.info(
+                f"[PersonaAudit] 后台任务: 会话 {session_id} 审核 LLM 返回: "
+                f"{'None' if correction is None else ('空' if correction == '' else correction[:200])}..."
+            )
+
+            async with self._pa_correction_lock:
+                self._pa_corrections[session_id] = correction
+            async with self._pa_inject_ready_lock:
+                self._pa_inject_ready[session_id] = True
+            async with self._pa_last_correction_lock:
+                self._pa_last_corrections[session_id] = correction
+
+            if correction:
+                logger.info(
+                    f"[PersonaAudit] 后台任务: 会话 {session_id} "
+                    f"审核完成，校正指示: {correction[:20]}..."
+                )
+            else:
+                logger.info(
+                    f"[PersonaAudit] 后台任务: 会话 {session_id} 审核完成，无需调整"
+                )
+        except asyncio.CancelledError:
+            self._log_debug(f"[PersonaAudit] 后台任务: 会话 {session_id} 被取消")
+        except Exception as e:
+            logger.error(f"[PersonaAudit] 后台任务: 会话 {session_id} 审核异常: {e}")
+        finally:
+            has_next = False
+            async with self._pa_audit_queue_lock:
+                if self._pa_audit_queue.pop(session_id, None) is not None:
+                    has_next = True
+
+            if has_next:
+                async with self._pa_watermark_lock:
+                    watermark = self._pa_watermarks.get(session_id, 0)
+                    self._pa_watermarks.pop(session_id, None)
+                logger.info(
+                    f"[PersonaAudit] 后台任务: 会话 {session_id} "
+                    f"队列中有等待的审核请求，继续处理（水印={watermark}）..."
+                )
+                buffer_len = await self._get_buffer_length(session_id)
+                fetch_count = buffer_len - watermark
+                if fetch_count < 1:
+                    fetch_count = self._fetch_rounds * 2
+
+                new_conversation = await self._fetch_recent_conversation(
+                    session_id, fetch_count
+                )
+                if new_conversation:
+                    last_correction = ""
+                    async with self._pa_last_correction_lock:
+                        prev = self._pa_last_corrections.get(session_id)
+                        if prev and prev.strip():
+                            last_correction = prev.strip()
+
+                    async with self._pa_counter_lock:
+                        self._pa_counters[session_id] = 0
+                    async with self._pa_watermark_lock:
+                        self._pa_watermarks[session_id] = await self._get_buffer_length(
+                            session_id
+                        )
+
+                    task = asyncio.create_task(
+                        self._run_pa_audit_task(
+                            session_id=session_id,
+                            provider=provider,
+                            conversation_text=new_conversation,
+                            last_correction=last_correction,
+                        )
+                    )
+                    async with self._pa_running_tasks_lock:
+                        self._pa_running_tasks[session_id] = task
+                else:
+                    logger.warning(
+                        f"[PersonaAudit] 后台任务: 会话 {session_id} "
+                        f"队列请求无可审核内容，跳过"
+                    )
+            else:
+                async with self._pa_watermark_lock:
+                    self._pa_watermarks.pop(session_id, None)
+
+            async with self._pa_running_tasks_lock:
+                if self._pa_running_tasks.get(session_id) is asyncio.current_task():
+                    del self._pa_running_tasks[session_id]
+
+    async def _call_persona_audit_llm(
+        self,
+        provider: Any,
+        conversation_text: str,
+        last_correction: str,
+    ) -> str | None:
+        """调用人格审核 LLM，使用独立的人格 prompt 模板。"""
+        prompt_text = DEFAULT_PERSONA_AUDIT_PROMPT.format(
+            persona_prompt=self._persona_prompt,
+            last_correction=last_correction or "无",
+            conversation=conversation_text,
+        )
+
+        try:
+            resp = await provider.text_chat(
+                prompt=prompt_text,
+                persist=False,
+            )
+        except Exception as e:
+            logger.error(f"[PersonaAudit] 审核 LLM 调用异常: {e}")
+            return None
+
+        if resp is None:
+            return None
+
+        result_text = ""
+        if hasattr(resp, "completion_text") and resp.completion_text:
+            result_text = resp.completion_text.strip()
+        elif isinstance(resp, dict):
+            result_text = str(resp.get("completion_text", "") or "").strip()
+
+        if not result_text:
+            return None
+
+        if "无需调整" in result_text or "无法进行审核" in result_text:
+            return ""
+
+        for prefix in ("调整方向:", "调整方向："):
+            if prefix in result_text:
+                idx = result_text.find(prefix)
+                return result_text[idx + len(prefix) :].strip()
+
+        return result_text.strip()
+
+    # ---- 内部方法 ----
 
     def _log_debug(self, msg: str) -> None:
         """仅在 content_audit_debug 开启时输出 debug 日志。"""

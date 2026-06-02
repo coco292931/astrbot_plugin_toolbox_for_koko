@@ -187,6 +187,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
                 "password": auth_cfg.get("password", ""),
             }
 
+
     content_audit_cfg = raw.get("content_audit", {})
     if isinstance(content_audit_cfg, dict):
         for key in (
@@ -201,6 +202,16 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             if key in content_audit_cfg:
                 incoming[key] = content_audit_cfg.get(key)
 
+    persona_audit_cfg = raw.get("persona_audit", {})
+    if isinstance(persona_audit_cfg, dict):
+        for key in (
+            "persona_audit_enabled",
+            "persona_audit_rounds",
+            "persona_audit_prompt",
+        ):
+            if key in persona_audit_cfg:
+                incoming[key] = persona_audit_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 
@@ -211,7 +222,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.8",
+    "1.3.9",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -326,6 +337,24 @@ class ToolboxPlugin(Star):
             f"[content_audit] __init__ 实例化条件: "
             f"content_audit_enabled={self.content_audit_enabled}"
         )
+
+        # ---- persona_audit 配置加载 ----
+        self.persona_audit_enabled = self._safe_bool(
+            self.config.get("persona_audit_enabled", False), False
+        )
+        self.persona_audit_rounds = self._safe_int(
+            self.config.get("persona_audit_rounds", 5), 5, 1, 50
+        )
+        self.persona_audit_prompt = str(
+            self.config.get("persona_audit_prompt", "") or ""
+        ).strip()
+        logger.debug(
+            f"[persona_audit] __init__ 配置: "
+            f"enabled={self.persona_audit_enabled}, "
+            f"rounds={self.persona_audit_rounds}, "
+            f"prompt_len={len(self.persona_audit_prompt)}"
+        )
+
         if self.content_audit_enabled:
             self.content_audit = ContentAuditLoop(self)
             logger.info("[content_audit] ContentAuditLoop 已实例化")
@@ -2077,9 +2106,7 @@ class ToolboxPlugin(Star):
             audit_loop = getattr(self, "content_audit", None)
             if audit_loop:
                 try:
-                    await audit_loop.inject_to_request(
-                        event, request
-                    )
+                    await audit_loop.inject_to_request(event, request)
                 except Exception as e:
                     logger.debug(f"[content_audit] 注入校正指示失败: {e}")
         except Exception as e:
@@ -2108,11 +2135,7 @@ class ToolboxPlugin(Star):
                 if reply_text:
                     try:
                         provider = self.context.get_using_provider()
-                        # logger.debug(
-                        #     f"[content_audit] 准备调用 on_ai_reply, "
-                        #     f"会话={event.unified_msg_origin}, "
-                        #     f"provider={'有' if provider else '无'}"
-                        # )
+                        # 内容审核
                         await audit_loop.on_ai_reply(
                             event,
                             reply_text,
@@ -2120,6 +2143,17 @@ class ToolboxPlugin(Star):
                         )
                     except Exception as e:
                         logger.debug(f"[content_audit] 审核失败: {e}")
+
+                    # 人格遵循审核（并行，与内容审核独立）
+                    try:
+                        if self.persona_audit_enabled:
+                            await audit_loop.on_ai_reply_persona(
+                                event,
+                                reply_text,
+                                provider,
+                            )
+                    except Exception as e:
+                        logger.debug(f"[persona_audit] 人格审核失败: {e}")
                 else:
                     logger.debug(
                         f"[content_audit] 跳过审核: reply_text 为空, "
