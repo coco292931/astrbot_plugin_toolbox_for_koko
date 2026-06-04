@@ -13,6 +13,8 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.platform import MessageType
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.star.star_tools import StarTools
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
@@ -423,7 +425,7 @@ class ToolboxPlugin(Star):
         self._history_pagination_cache = {}
 
         # 记忆存储
-        self.data_dir = Path(__file__).with_name("data")
+        self.data_dir = self._resolve_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         max_memories_per_user = self._safe_int(
             self.config.get("max_memories_per_user", 100), 100, 1, 10000
@@ -472,6 +474,19 @@ class ToolboxPlugin(Star):
         self._cache_time = 0.0
         self._cache_expire = 300
         self._cache_lock = asyncio.Lock()
+
+    def _resolve_data_dir(self) -> Path:
+        try:
+            return Path(StarTools.get_data_dir("astrbot_plugin_toolbox_for_koko"))
+        except RuntimeError:
+            return (
+                Path(get_astrbot_data_path())
+                / "plugin_data"
+                / "astrbot_plugin_toolbox_for_koko"
+            )
+
+    def get_data_dir(self) -> str:
+        return str(self.data_dir)
 
     def _safe_int(self, value, default: int, min_v: int, max_v: int) -> int:
         try:
