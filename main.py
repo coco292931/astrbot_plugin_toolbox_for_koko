@@ -189,7 +189,6 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
                 "password": auth_cfg.get("password", ""),
             }
 
-
     content_audit_cfg = raw.get("content_audit", {})
     if isinstance(content_audit_cfg, dict):
         for key in (
@@ -200,6 +199,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "content_audit_criteria",
             "content_audit_keywords",
             "content_audit_debug",
+            "content_audit_inject_mode",
         ):
             if key in content_audit_cfg:
                 incoming[key] = content_audit_cfg.get(key)
@@ -210,6 +210,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "persona_audit_enabled",
             "persona_audit_rounds",
             "persona_audit_prompt",
+            "persona_audit_inject_mode",
         ):
             if key in persona_audit_cfg:
                 incoming[key] = persona_audit_cfg.get(key)
@@ -224,7 +225,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.9",
+    "1.3.10",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -335,6 +336,16 @@ class ToolboxPlugin(Star):
         self.content_audit_debug = self._safe_bool(
             self.config.get("content_audit_debug", False), False
         )
+        self.content_audit_inject_mode = (
+            str(
+                self.config.get("content_audit_inject_mode", "conversation")
+                or "conversation"
+            )
+            .strip()
+            .lower()
+        )
+        if self.content_audit_inject_mode not in ("prompt", "conversation"):
+            self.content_audit_inject_mode = "conversation"
         logger.debug(
             f"[content_audit] __init__ 实例化条件: "
             f"content_audit_enabled={self.content_audit_enabled}"
@@ -350,6 +361,16 @@ class ToolboxPlugin(Star):
         self.persona_audit_prompt = str(
             self.config.get("persona_audit_prompt", "") or ""
         ).strip()
+        self.persona_audit_inject_mode = (
+            str(
+                self.config.get("persona_audit_inject_mode", "conversation")
+                or "conversation"
+            )
+            .strip()
+            .lower()
+        )
+        if self.persona_audit_inject_mode not in ("prompt", "conversation"):
+            self.persona_audit_inject_mode = "conversation"
         logger.debug(
             f"[persona_audit] __init__ 配置: "
             f"enabled={self.persona_audit_enabled}, "

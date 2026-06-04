@@ -36,6 +36,7 @@ DEFAULT_AUDIT_PROMPT = (
     "- 如果对话中用户有要求，则以用户要求为优先，临时更改、减弱或忽略部分调整项。\n"
     "- 如果对话中用户明确提出或质疑ai的回复风格不对，优先指引ai重新回顾自身提示词，基于自身设定重新组织语言。\n"
     "- 矫正规则可以适当放宽，忽略轻微偏移，但若触发重点或禁止性规则，则必须说明。\n"
+    "- 前次调整方向仅供参考，若非必要或与审核标准相悖，可以忽略。\n"
     "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。\n"
     "- 矫正指示应当引导AI调整后续回复内容，但避免指出具体错误案例。\n\n"
     "[审核标准]\n"
@@ -104,8 +105,23 @@ class ContentAuditLoop:
         )
         self._persona_prompt: str = getattr(plugin, "persona_audit_prompt", "") or ""
 
+        self._inject_mode_pa: str = (
+            getattr(plugin, "persona_audit_inject_mode", "conversation")
+            or "conversation"
+        )
+        if self._inject_mode_pa not in ("prompt", "conversation"):
+            self._inject_mode_pa = "conversation"
+
         # 调试日志开关
         self._debug_enabled: bool = bool(getattr(plugin, "content_audit_debug", False))
+
+        # 注入模式: "prompt" → system_prompt, "conversation" → extra_user_content_parts
+        self._inject_mode_ca: str = (
+            getattr(plugin, "content_audit_inject_mode", "conversation")
+            or "conversation"
+        )
+        if self._inject_mode_ca not in ("prompt", "conversation"):
+            self._inject_mode_ca = "conversation"
 
         # ---- 内容审核状态（原有） ----
         # session_id -> int（消息计数器）
@@ -420,6 +436,11 @@ class ContentAuditLoop:
     async def inject_to_request(self, event: AstrMessageEvent, request: Any) -> None:
         """在下一条用户消息的 LLM 请求中注入校正指示（一次性）。
 
+        注入位置由 _inject_mode_ca / _inject_mode_pa 控制：
+          - "prompt"       → 追加到 system_prompt
+          - "conversation" → 追加到 extra_user_content_parts（会话侧）
+        默认 conversation。
+
         Args:
             event: 当前消息事件
             request: ProviderRequest 对象
@@ -462,26 +483,8 @@ class ContentAuditLoop:
 
         reminder = f"<system_WARNING>上下文内容已触发对话审核规则，请按照指示调整后续回复：{correction}</system_WARNING>"
 
-        if hasattr(request, "system_prompt") and request.system_prompt:
-            # 追加到 system_prompt，与 Mnemosyne 的 memory_inject 注入方式一致
-            request.system_prompt += f"\n\n{reminder}"
-            logger.info(f"[ContentAudit] 已注入校正指示(system_prompt)到 key={key}")
-        elif (
-            hasattr(request, "extra_user_content_parts")
-            and request.extra_user_content_parts
-        ):
-            try:
-                request.extra_user_content_parts.append(
-                    type(request.extra_user_content_parts[0])(text=reminder)
-                )
-                logger.info(f"[ContentAudit] 已注入校正指示(extra)到 key={key}")
-            except Exception as e:
-                self._log_debug(f"[ContentAudit] 注入校正指示(extra)失败: {e}")
-        elif hasattr(request, "prompt"):
-            # 最终回退：直接附加到 prompt 尾部
-            current_prompt = request.prompt if isinstance(request.prompt, str) else ""
-            request.prompt = current_prompt + f"\n\n{reminder}"
-            logger.info(f"[ContentAudit] 已注入校正指示(prompt)到 key={key}")
+        # 根据 _inject_mode_ca 选择注入位置
+        self._do_inject(request, reminder, self._inject_mode_ca, "ContentAudit", key)
 
         # === 第二部分：人格遵循审核注入 ===
         pa_correction = None
@@ -502,31 +505,79 @@ class ContentAuditLoop:
                     self._pa_inject_ready[key] = True
             elif pa_correction.strip():
                 pa_reminder = f"<system_WARNING>上下文内容已触发人格遵循审核，请按照指示调整后续回复：{pa_correction}</system_WARNING>"
-
-                if hasattr(request, "system_prompt") and request.system_prompt:
-                    request.system_prompt += f"\n\n{pa_reminder}"
-                    logger.info(
-                        f"[PersonaAudit] 已注入校正指示(system_prompt)到 key={key}"
-                    )
-                elif (
-                    hasattr(request, "extra_user_content_parts")
-                    and request.extra_user_content_parts
-                ):
-                    try:
-                        request.extra_user_content_parts.append(
-                            type(request.extra_user_content_parts[0])(text=pa_reminder)
-                        )
-                        logger.info(f"[PersonaAudit] 已注入校正指示(extra)到 key={key}")
-                    except Exception as e:
-                        self._log_debug(f"[PersonaAudit] 注入校正指示(extra)失败: {e}")
-                elif hasattr(request, "prompt"):
-                    current_prompt = (
-                        request.prompt if isinstance(request.prompt, str) else ""
-                    )
-                    request.prompt = current_prompt + f"\n\n{pa_reminder}"
-                    logger.info(f"[PersonaAudit] 已注入校正指示(prompt)到 key={key}")
+                self._do_inject(
+                    request, pa_reminder, self._inject_mode_pa, "PersonaAudit", key
+                )
             else:
                 self._log_debug(f"[PersonaAudit] key={key} 无需调整，跳过注入")
+
+    def _do_inject(
+        self,
+        request: Any,
+        text: str,
+        mode: str,
+        tag: str,
+        key: str,
+    ) -> None:
+        """将校正文本注入到 request 的指定位置。
+
+        Args:
+            request: ProviderRequest 对象
+            text: 要注入的校正文本（已含 <system_WARNING> 标签）
+            mode: "prompt" 或 "conversation"
+            tag: 日志标签（如 "ContentAudit" / "PersonaAudit"）
+            key: 会话 key（仅用于日志）
+        """
+        if mode == "conversation":
+            # 注入到会话侧：extra_user_content_parts
+            if (
+                hasattr(request, "extra_user_content_parts")
+                and request.extra_user_content_parts
+            ):
+                try:
+                    request.extra_user_content_parts.append(
+                        type(request.extra_user_content_parts[0])(text=text)
+                    )
+                    logger.info(f"[{tag}] 已注入校正指示(conversation)到 key={key}")
+                    return
+                except Exception as e:
+                    self._log_debug(f"[{tag}] 注入校正指示(conversation)失败: {e}")
+            # 回退：尝试 prompt
+            if hasattr(request, "prompt"):
+                current = request.prompt if isinstance(request.prompt, str) else ""
+                request.prompt = current + f"\n\n{text}"
+                logger.info(f"[{tag}] 已注入校正指示(prompt-回退)到 key={key}")
+                return
+            # 最终回退：system_prompt
+            if hasattr(request, "system_prompt") and request.system_prompt:
+                request.system_prompt += f"\n\n{text}"
+                logger.info(
+                    f"[{tag}] 已注入校正指示(system_prompt-最终回退)到 key={key}"
+                )
+                return
+            logger.warning(f"[{tag}] 无可用的注入点位，key={key}，丢弃校正指示")
+        else:
+            # mode == "prompt"：注入到 system_prompt
+            if hasattr(request, "system_prompt") and request.system_prompt:
+                request.system_prompt += f"\n\n{text}"
+                logger.info(f"[{tag}] 已注入校正指示(system_prompt)到 key={key}")
+            elif (
+                hasattr(request, "extra_user_content_parts")
+                and request.extra_user_content_parts
+            ):
+                try:
+                    request.extra_user_content_parts.append(
+                        type(request.extra_user_content_parts[0])(text=text)
+                    )
+                    logger.info(f"[{tag}] 已注入校正指示(extra-回退)到 key={key}")
+                except Exception as e:
+                    self._log_debug(f"[{tag}] 注入校正指示(extra-回退)失败: {e}")
+            elif hasattr(request, "prompt"):
+                current = request.prompt if isinstance(request.prompt, str) else ""
+                request.prompt = current + f"\n\n{text}"
+                logger.info(f"[{tag}] 已注入校正指示(prompt-最终回退)到 key={key}")
+            else:
+                logger.warning(f"[{tag}] 无可用的注入点位，key={key}，丢弃校正指示")
 
     # ---- 人格遵循审核入口 ----
 

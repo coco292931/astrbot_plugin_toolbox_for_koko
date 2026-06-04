@@ -344,6 +344,13 @@
                 "hint": "开启后，logger.debug 级别的调试信息将打印到控制台。",
                 "type": "bool",
                 "default": false
+            },
+            "content_audit_inject_mode": {
+                "description": "校正注入位置",
+                "hint": "prompt=追加到系统提示词, conversation=追加到会话上下文中（用户消息侧）。默认 conversation。",
+                "type": "string",
+                "default": "conversation",
+                "options": ["prompt", "conversation"]
             }
         }
     },
@@ -374,6 +381,13 @@
                 "hint": "定义 AI 应遵守的人格特征描述。LLM 将据此审核回复是否符合人格。",
                 "type": "string",
                 "default": "你是一个可爱、友善的助手，说话语气温柔，使用口语化表达。"
+            },
+            "persona_audit_inject_mode": {
+                "description": "校正注入位置",
+                "hint": "prompt=追加到系统提示词, conversation=追加到会话上下文中（用户消息侧）。默认 conversation。",
+                "type": "string",
+                "default": "conversation",
+                "options": ["prompt", "conversation"]
             }
         }
     },
