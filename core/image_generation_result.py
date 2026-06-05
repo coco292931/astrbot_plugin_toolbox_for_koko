@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import uuid
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.message import TextPart
+from astrbot.core.utils.media_utils import compress_image
 
 
 class ImageGenerationResultHandler:
@@ -20,6 +24,14 @@ class ImageGenerationResultHandler:
         r"<image_generation_task_result>\s*(\{.*?\})\s*</image_generation_task_result>",
         re.DOTALL,
     )
+    _TASK_SUMMARY_PATTERN = re.compile(
+        r"\[ImageGenerationTask\]\s*task_id=([a-zA-Z0-9_-]+),\s*status=([a-zA-Z0-9_-]+)",
+        re.DOTALL,
+    )
+    _GENERATED_PATH_PATTERN = re.compile(
+        r"\[Generated image path:\s*(.*?)\]",
+        re.DOTALL,
+    )
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
@@ -31,18 +43,25 @@ class ImageGenerationResultHandler:
             return
 
         payload = self._extract_task_payload(request)
-        if not payload:
+        result_paths = self._extract_result_paths(request, payload)
+        if not payload and not result_paths:
             return
 
-        task_id = str(payload.get("task_id", "") or "").strip()
-        status = str(payload.get("status", "") or "").strip().lower()
-        result_paths = [
-            str(path).strip()
-            for path in (payload.get("result_paths") or [])
-            if str(path).strip()
-        ]
-        if status != "succeeded" or not result_paths:
+        task_id = str((payload or {}).get("task_id", "") or "").strip()
+        status = str((payload or {}).get("status", "") or "").strip().lower()
+        if not task_id:
+            task_id, status = self._extract_task_summary(request)
+        if status and status != "succeeded":
+            logger.debug(
+                f"[ImageGenResult] 检测到任务 {task_id or 'unknown'} 状态={status}，跳过识图"
+            )
             return
+        if not result_paths:
+            return
+
+        logger.info(
+            f"[ImageGenResult] 捕获到生图完成请求: 任务={task_id or 'unknown'}，图片数={len(result_paths)}，会话={event.unified_msg_origin}"
+        )
 
         caption_text = self._task_caption_cache.get(task_id)
         if not caption_text:
@@ -67,27 +86,22 @@ class ImageGenerationResultHandler:
                     image_index=index,
                     image_count=len(result_paths),
                 )
-                try:
-                    resp = await provider.text_chat(
-                        prompt=prompt,
-                        image_urls=[img_path],
-                        persist=False,
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {index} 张识图失败: {exc}"
-                    )
-                    continue
-
-                text = str(getattr(resp, "completion_text", "") or "").strip()
-                if not text and isinstance(resp, dict):
-                    text = str(resp.get("completion_text", "") or "").strip()
+                text = await self._caption_generated_image(
+                    provider=provider,
+                    image_path=img_path,
+                    prompt=prompt,
+                    task_id=task_id,
+                    image_index=index,
+                )
                 if not text:
                     continue
 
                 captions.append(f"- 图片{index}: {text}")
 
             if not captions:
+                logger.warning(
+                    f"[ImageGenResult] 任务 {task_id or 'unknown'} 未产出任何识图摘要"
+                )
                 return
 
             caption_text = "\n".join(captions)
@@ -111,11 +125,7 @@ class ImageGenerationResultHandler:
         )
 
     def _extract_task_payload(self, request: Any) -> dict[str, Any] | None:
-        if not hasattr(request, "extra_user_content_parts"):
-            return None
-
-        for part in request.extra_user_content_parts:
-            text = str(getattr(part, "text", "") or "")
+        for text in self._iter_request_texts(request):
             if "<image_generation_task_result>" not in text:
                 continue
 
@@ -131,6 +141,58 @@ class ImageGenerationResultHandler:
             if isinstance(payload, dict):
                 return payload
         return None
+
+    def _extract_task_summary(self, request: Any) -> tuple[str, str]:
+        for text in self._iter_request_texts(request):
+            match = self._TASK_SUMMARY_PATTERN.search(text)
+            if match:
+                return match.group(1).strip(), match.group(2).strip().lower()
+        return "", ""
+
+    def _extract_result_paths(
+        self,
+        request: Any,
+        payload: dict[str, Any] | None,
+    ) -> list[str]:
+        paths: list[str] = []
+        if isinstance(payload, dict):
+            for path in payload.get("result_paths") or []:
+                normalized = str(path).strip()
+                if normalized:
+                    paths.append(normalized)
+
+        image_urls = getattr(request, "image_urls", None)
+        if isinstance(image_urls, list):
+            for path in image_urls:
+                normalized = str(path).strip()
+                if normalized:
+                    paths.append(normalized)
+
+        for text in self._iter_request_texts(request):
+            for match in self._GENERATED_PATH_PATTERN.finditer(text):
+                normalized = str(match.group(1) or "").strip()
+                if normalized:
+                    paths.append(normalized)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            deduped.append(path)
+        return deduped
+
+    def _iter_request_texts(self, request: Any):
+        if hasattr(request, "prompt") and isinstance(request.prompt, str):
+            yield request.prompt
+        if hasattr(request, "system_prompt") and isinstance(request.system_prompt, str):
+            yield request.system_prompt
+        if hasattr(request, "extra_user_content_parts"):
+            for part in request.extra_user_content_parts:
+                text = str(getattr(part, "text", "") or "")
+                if text:
+                    yield text
 
     def _build_prompt(
         self,
@@ -173,3 +235,93 @@ class ImageGenerationResultHandler:
         except Exception:
             pass
         return None
+
+    def _get_compress_config(self) -> tuple[bool, int, int]:
+        try:
+            cfg = self.plugin.context.get_config()
+            settings = cfg.get("provider_settings", {})
+            enabled = bool(settings.get("image_compress_enabled", True))
+            options = settings.get("image_compress_options", {}) or {}
+            max_size = int(options.get("max_size", 1280))
+            quality = int(options.get("quality", 95))
+            quality = max(1, min(quality, 100))
+            return enabled, max_size, quality
+        except Exception:
+            return True, 1280, 95
+
+    async def _caption_generated_image(
+        self,
+        *,
+        provider: Any,
+        image_path: str,
+        prompt: str,
+        task_id: str,
+        image_index: int,
+    ) -> str:
+        try:
+            resp = await provider.text_chat(
+                prompt=prompt,
+                image_urls=[image_path],
+                persist=False,
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+            if not text and isinstance(resp, dict):
+                text = str(resp.get("completion_text", "") or "").strip()
+            if text:
+                logger.info(
+                    f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {image_index} 张识图成功"
+                )
+                return text
+        except Exception as exc:
+            logger.debug(
+                f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {image_index} 张直接识图失败: {exc}"
+            )
+
+        local_path = Path(image_path)
+        if not local_path.exists():
+            logger.debug(
+                f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {image_index} 张路径不存在: {image_path}"
+            )
+            return ""
+
+        retry_path = str(local_path)
+        try:
+            compress_enabled, max_size, quality = self._get_compress_config()
+            if compress_enabled:
+                retry_path = await compress_image(
+                    retry_path, max_size=max_size, quality=quality
+                )
+
+            if local_path.suffix.lower() == ".gif":
+                from PIL import Image as PILImage
+                from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+                with PILImage.open(retry_path) as pil_img:
+                    if getattr(pil_img, "is_animated", False):
+                        pil_img.seek(0)
+                        frame = pil_img.convert("RGB")
+                        frame_path = os.path.join(
+                            get_astrbot_temp_path(),
+                            f"img_gen_result_{uuid.uuid4()}.jpg",
+                        )
+                        frame.save(frame_path, "JPEG", quality=quality)
+                        retry_path = frame_path
+
+            resp = await provider.text_chat(
+                prompt=prompt,
+                image_urls=[retry_path],
+                persist=False,
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+            if not text and isinstance(resp, dict):
+                text = str(resp.get("completion_text", "") or "").strip()
+            if text:
+                logger.info(
+                    f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {image_index} 张降级识图成功"
+                )
+                return text
+        except Exception as exc:
+            logger.debug(
+                f"[ImageGenResult] 任务 {task_id or 'unknown'} 第 {image_index} 张降级识图失败: {exc}"
+            )
+        return ""
