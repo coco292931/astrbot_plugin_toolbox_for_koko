@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api.message_components import Image as MsgImage
 from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.media_utils import compress_image
 
@@ -36,6 +38,7 @@ class ImageGenerationResultHandler:
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._task_caption_cache: dict[str, str] = {}
+        self._sent_image_cache: dict[str, float] = {}
 
     async def process(self, event: AstrMessageEvent, request: Any) -> None:
         """检测图像生成任务完成请求，并把识图结果注入上下文。"""
@@ -124,6 +127,67 @@ class ImageGenerationResultHandler:
             f"[ImageGenResult] 已为任务 {task_id or 'unknown'} 注入识图摘要，会话: {event.unified_msg_origin}"
         )
 
+    async def process_sent_message(self, event: AstrMessageEvent) -> str | None:
+        """在 Bot 发图后补发一条独立的识图结果。"""
+        image_paths = self._extract_generation_images_from_event(event)
+        if not image_paths:
+            return None
+
+        fingerprint = f"{event.unified_msg_origin}|{'|'.join(image_paths)}"
+        now = time.time()
+        expired = [
+            key for key, ts in self._sent_image_cache.items() if (now - ts) > 600
+        ]
+        for key in expired:
+            self._sent_image_cache.pop(key, None)
+        if fingerprint in self._sent_image_cache:
+            logger.debug(
+                f"[ImageGenResult] 跳过重复的发图识别: 会话={event.unified_msg_origin}"
+            )
+            return None
+
+        provider = await self._resolve_caption_provider()
+        if not provider:
+            logger.warning(
+                f"[ImageGenResult] 发图后识图未找到可用 Provider，会话={event.unified_msg_origin}"
+            )
+            return None
+
+        logger.info(
+            f"[ImageGenResult] 捕获到发图后的生图结果，会话={event.unified_msg_origin}，图片数={len(image_paths)}"
+        )
+        max_images = max(
+            1,
+            min(int(self.plugin.image_generation_result_max_images or 1), len(image_paths)),
+        )
+        lines: list[str] = []
+        for index, img_path in enumerate(image_paths[:max_images], start=1):
+            prompt = self._build_prompt(
+                task_id="sent_message",
+                image_index=index,
+                image_count=len(image_paths),
+            )
+            text = await self._caption_generated_image(
+                provider=provider,
+                image_path=img_path,
+                prompt=prompt,
+                task_id="sent_message",
+                image_index=index,
+            )
+            if text:
+                lines.append(f"图片{index}：{text}")
+
+        if not lines:
+            logger.warning(
+                f"[ImageGenResult] 发图后识图没有产出摘要，会话={event.unified_msg_origin}"
+            )
+            return None
+
+        self._sent_image_cache[fingerprint] = now
+        if len(lines) == 1:
+            return f"识图结果：{lines[0]}"
+        return "识图结果：\n" + "\n".join(lines)
+
     def _extract_task_payload(self, request: Any) -> dict[str, Any] | None:
         for text in self._iter_request_texts(request):
             if "<image_generation_task_result>" not in text:
@@ -173,6 +237,33 @@ class ImageGenerationResultHandler:
                 normalized = str(match.group(1) or "").strip()
                 if normalized:
                     paths.append(normalized)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            deduped.append(path)
+        return deduped
+
+    def _extract_generation_images_from_event(self, event: AstrMessageEvent) -> list[str]:
+        paths: list[str] = []
+        try:
+            messages = event.get_messages() or []
+        except Exception:
+            messages = []
+
+        for comp in messages:
+            if not isinstance(comp, MsgImage):
+                continue
+            candidate = str(getattr(comp, "file", "") or getattr(comp, "url", "") or "").strip()
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            filename = Path(candidate).name.lower()
+            if "astrbot_plugin_image_generation" in lowered or filename.startswith("gen_"):
+                paths.append(candidate)
 
         deduped: list[str] = []
         seen: set[str] = set()

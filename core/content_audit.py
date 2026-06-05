@@ -82,7 +82,12 @@ class ContentAuditLoop:
 
         # 配置
         self._audit_rounds: int = max(1, getattr(plugin, "content_audit_rounds", 5))
-        self._min_rounds: int = max(0, getattr(plugin, "content_audit_min_rounds", 2))
+        _raw_min = getattr(plugin, "content_audit_min_rounds", None)
+        logger.info(
+            f"[ContentAudit] _min_rounds raw from plugin: {_raw_min!r}, "
+            f"type={type(_raw_min).__name__}"
+        )
+        self._min_rounds: int = max(0, _raw_min if isinstance(_raw_min, int) else 2)
         self._fetch_rounds: int = max(
             1, getattr(plugin, "content_audit_fetch_rounds", 5)
         )

@@ -230,7 +230,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.13",
+    "1.3.14",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -757,7 +757,7 @@ class ToolboxPlugin(Star):
             roll = random.random()
             if roll > probability:
                 logger.debug(
-                    f"[keyword_capture] 未通过概率门限: roll={roll:.4f}, "
+                    f"[keyword_capture] 未通过概率门限: roll={roll:.4f} >"
                     f"p={probability:.4f}, keyword_hit={is_keyword_hit}"
                 )
                 return
@@ -2240,6 +2240,26 @@ class ToolboxPlugin(Star):
                 )
         except Exception as e:
             logger.debug(f"[on_llm_response] 处理失败: {e}")
+
+    @filter.after_message_sent()
+    async def after_message_sent(self, event: AstrMessageEvent) -> None:
+        """Bot 发图后：若检测到生图结果图片，则补发一条识图结果。"""
+        try:
+            recognition_text = await self.image_generation_result_handler.process_sent_message(
+                event
+            )
+            if not recognition_text:
+                return
+
+            await self.context.send_message(
+                event.unified_msg_origin,
+                MessageChain().message(recognition_text),
+            )
+            logger.info(
+                f"[ImageGenResult] 已补发识图结果，会话: {event.unified_msg_origin}"
+            )
+        except Exception as e:
+            logger.debug(f"[after_message_sent] 生图结果识图补发失败: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")
