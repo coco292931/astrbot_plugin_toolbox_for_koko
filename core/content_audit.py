@@ -91,6 +91,11 @@ class ContentAuditLoop:
             or "回复应当友好、有用，不包含敏感内容。"
         )
 
+        # 关键词审核开关
+        self._keyword_audit_enabled: bool = bool(
+            getattr(plugin, "content_audit_keyword_enabled", True)
+        )
+
         # 审核关键词（针对 AI 回复内容匹配，命中后直接生成校正指示）
         self._audit_keywords: list[str] = getattr(plugin, "content_audit_keywords", [])
         if not isinstance(self._audit_keywords, list):
@@ -232,17 +237,30 @@ class ContentAuditLoop:
         async with self._pending_keyword_lock:
             has_pending = self._pending_keyword.pop(key, False)
 
-        if has_pending and current_count >= self._min_rounds:
-            should_trigger = True
-            trigger_reason = "保持位触发"
-            logger.info(
-                f"[ContentAudit] key={key} 保持位触发审核，"
-                f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
-            )
+        if has_pending:
+            if current_count >= self._min_rounds:
+                should_trigger = True
+                trigger_reason = "保持位触发"
+                logger.info(
+                    f"[ContentAudit] key={key} 保持位触发审核，"
+                    f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
+                )
+            else:
+                # 保持位已消费但未达到最小轮数，重新设回等待下一轮
+                self._pending_keyword[key] = True
+                self._log_debug(
+                    f"[ContentAudit] key={key} 保持位已消费但当前计数 "
+                    f"{current_count} < 最小轮数 {self._min_rounds}，重新设置保持位"
+                )
 
         # ---- 第四步：判断是否为关键词触发 ----
         matched_keywords: list[str] = []
-        if not should_trigger and self._audit_keywords and reply_text:
+        if (
+            not should_trigger
+            and self._keyword_audit_enabled
+            and self._audit_keywords
+            and reply_text
+        ):
             matched_keywords = [kw for kw in self._audit_keywords if kw in reply_text]
         is_keyword_trigger = bool(matched_keywords)
 
@@ -269,6 +287,12 @@ class ContentAuditLoop:
                         self._pending_keyword[key] = True
                     return
             elif current_count >= self._audit_rounds:
+                if self._min_rounds > 0 and current_count < self._min_rounds:
+                    self._log_debug(
+                        f"[ContentAudit] key={key} 达到消息阈值({current_count}>={self._audit_rounds})"
+                        f"但未达到最小间隔({self._min_rounds})，跳过"
+                    )
+                    return
                 should_trigger = True
                 trigger_reason = "达到消息阈值，触发审核"
             else:

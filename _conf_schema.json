@@ -319,6 +319,12 @@
                 "type": "string",
                 "default": "回复应当友好、有用，不包含敏感内容。"
             },
+            "content_audit_keyword_enabled": {
+                "description": "启用关键词审核",
+                "hint": "关闭后关键词将不会触发审核功能。",
+                "type": "bool",
+                "default": true
+            },
             "content_audit_keywords": {
                 "description": "审核关键词列表",
                 "hint": "针对 AI 回复内容的关键词匹配。命中后直接生成校正指示，不等待轮数触发。例如 [\"我不确定\", \"我不知道\"]。",
