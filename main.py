@@ -199,7 +199,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
             "content_audit_enabled",
             "content_audit_rounds",
             "content_audit_fetch_rounds",
-            "content_audit_min_rounds",
+            "content_audit_min_interval",
             "content_audit_criteria",
             "content_audit_keyword_enabled",
             "content_audit_keywords",
@@ -230,7 +230,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.14",
+    "1.3.15",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -329,8 +329,8 @@ class ToolboxPlugin(Star):
         self.content_audit_fetch_rounds = self._safe_int(
             self.config.get("content_audit_fetch_rounds", 5), 5, 1, 50
         )
-        self.content_audit_min_rounds = self._safe_int(
-            self.config.get("content_audit_min_rounds", 2), 2, 0, 50
+        self.content_audit_min_interval = self._safe_int(
+            self.config.get("content_audit_min_interval", 2), 2, 0, 50
         )
         self.content_audit_criteria = str(
             self.config.get("content_audit_criteria", "") or ""
@@ -412,6 +412,11 @@ class ToolboxPlugin(Star):
         )
         self.image_caption_handler = ImageCaptionHandler(self)
         self.image_generation_result_handler = ImageGenerationResultHandler(self)
+        logger.info(
+            "[ImageGenResult] 生图结果识图功能已初始化: "
+            f"enabled={self.image_generation_result_hook_enabled}, "
+            f"max_images={self.image_generation_result_max_images}"
+        )
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(
@@ -2245,10 +2250,24 @@ class ToolboxPlugin(Star):
     async def after_message_sent(self, event: AstrMessageEvent) -> None:
         """Bot 发图后：若检测到生图结果图片，则补发一条识图结果。"""
         try:
-            recognition_text = await self.image_generation_result_handler.process_sent_message(
-                event
+            try:
+                message_types = [
+                    type(comp).__name__ for comp in (event.get_messages() or [])
+                ]
+            except Exception:
+                message_types = []
+            logger.info(
+                f"[ImageGenResult] after_message_sent 已触发: "
+                f"会话={event.unified_msg_origin}, components={message_types}"
+            )
+            recognition_text = (
+                await self.image_generation_result_handler.process_sent_message(event)
             )
             if not recognition_text:
+                logger.info(
+                    f"[ImageGenResult] after_message_sent 未识别到需要补发的生图结果: "
+                    f"会话={event.unified_msg_origin}"
+                )
                 return
 
             await self.context.send_message(

@@ -47,6 +47,9 @@ class ImageGenerationResultHandler:
 
         payload = self._extract_task_payload(request)
         result_paths = self._extract_result_paths(request, payload)
+        for event_path in self._extract_generation_images_from_event(event):
+            if event_path not in result_paths:
+                result_paths.append(event_path)
         if not payload and not result_paths:
             return
 
@@ -158,7 +161,10 @@ class ImageGenerationResultHandler:
         )
         max_images = max(
             1,
-            min(int(self.plugin.image_generation_result_max_images or 1), len(image_paths)),
+            min(
+                int(self.plugin.image_generation_result_max_images or 1),
+                len(image_paths),
+            ),
         )
         lines: list[str] = []
         for index, img_path in enumerate(image_paths[:max_images], start=1):
@@ -247,7 +253,9 @@ class ImageGenerationResultHandler:
             deduped.append(path)
         return deduped
 
-    def _extract_generation_images_from_event(self, event: AstrMessageEvent) -> list[str]:
+    def _extract_generation_images_from_event(
+        self, event: AstrMessageEvent
+    ) -> list[str]:
         paths: list[str] = []
         try:
             messages = event.get_messages() or []
@@ -257,12 +265,16 @@ class ImageGenerationResultHandler:
         for comp in messages:
             if not isinstance(comp, MsgImage):
                 continue
-            candidate = str(getattr(comp, "file", "") or getattr(comp, "url", "") or "").strip()
+            candidate = str(
+                getattr(comp, "file", "") or getattr(comp, "url", "") or ""
+            ).strip()
             if not candidate:
                 continue
             lowered = candidate.lower()
             filename = Path(candidate).name.lower()
-            if "astrbot_plugin_image_generation" in lowered or filename.startswith("gen_"):
+            if "astrbot_plugin_image_generation" in lowered or filename.startswith(
+                "gen_"
+            ):
                 paths.append(candidate)
 
         deduped: list[str] = []
@@ -279,9 +291,63 @@ class ImageGenerationResultHandler:
             yield request.prompt
         if hasattr(request, "system_prompt") and isinstance(request.system_prompt, str):
             yield request.system_prompt
+        contexts = getattr(request, "contexts", None)
+        if isinstance(contexts, list):
+            for message in contexts:
+                yield from self._iter_message_texts(message)
         if hasattr(request, "extra_user_content_parts"):
             for part in request.extra_user_content_parts:
                 text = str(getattr(part, "text", "") or "")
+                if text:
+                    yield text
+
+    def _iter_message_texts(self, message: Any):
+        if isinstance(message, str):
+            text = message.strip()
+            if text:
+                yield text
+            return
+
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    yield text
+            elif isinstance(content, list):
+                for part in content:
+                    yield from self._iter_content_part_texts(part)
+            return
+
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                yield text
+        elif isinstance(content, list):
+            for part in content:
+                yield from self._iter_content_part_texts(part)
+
+    def _iter_content_part_texts(self, part: Any):
+        if isinstance(part, str):
+            text = part.strip()
+            if text:
+                yield text
+            return
+
+        if isinstance(part, dict):
+            for key in ("text", "content"):
+                value = part.get(key)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if text:
+                        yield text
+            return
+
+        for attr in ("text", "content"):
+            value = getattr(part, attr, None)
+            if isinstance(value, str):
+                text = value.strip()
                 if text:
                     yield text
 
