@@ -6,6 +6,7 @@
 
 - 💬 **关键词捕捉与群聊主动回复 (Interaction)**：监听特定关键词并按自定义概率触发对话回复。支持基础主动回复概率，未命中关键词时也可在群聊中按概率主动参与对话。内置独立的群聊上下文管理器（`KCContextManager`），记录群聊消息并注入上下文，支持延迟图片转述、自定义 prompt 模板，与 AstrBot LTM 完全解耦。
 - 🖼️ **图片转述后处理 (ImageCaption)**：在 `on_llm_request` 钩子中检测 AstrBot 图片转述失败，自动从原始消息重新提取图片进行降级转述（下载、压缩、GIF 取帧）。自动清理 AstrBot 的失败标记，仅保留转述成功的内容。与群聊上下文管理完全解耦。
+- 🎨 **生图结果自动识图 (ImageGenerationResult)**：当 `astrbot_plugin_image_generation` 的后台生图任务完成并唤醒 AI 继续发送结果时，自动读取任务里的生成图片路径，先做一次识图摘要，再把摘要注入到该轮上下文里，方便 AI 在发图时顺手带上识图说明。
 - 🌤️ **多维天气预报与生活指数**：基于和风天气 (QWeather)，支持实时、3日、7日的天气预报以及生活指数查询。支持历史天气回溯。内置 LLM 总结功能，可直传原始 JSON 给大模型生成亲切的天气简报。
 - 🔍 **智能联网网页搜索**：集成智谱大模型搜索接口。支持普通/深度搜索、多粒度摘要提取、时效性过滤。
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
@@ -34,6 +35,7 @@ astrbot_plugin_toolbox_for_koko/
 │   ├── memory_manager.py     # 内存管理器（本地 JSON 存储）
 │   ├── kc_context.py         # 群聊上下文管理器（KCContextManager）
 │   ├── image_caption.py      # 图片转述前处理器（ImageCaptionHandler）
+│   ├── image_generation_result.py # 生图结果识图注入处理器（ImageGenerationResultHandler）
 │   └── content_audit.py      # 自动内容审核校正器（ContentAuditLoop）
 ├── tools/
 │   ├── __init__.py
@@ -113,6 +115,9 @@ astrbot_plugin_toolbox_for_koko/
 
 - **image_caption_hook_enabled**: 启用图片转述后处理。开启后检测 AstrBot 图片转述失败并自动降级。关闭时不影响群聊上下文中的图片转述。
 - **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型。留空使用默认模板。
+- **image_generation_result_hook_enabled**: 启用生图结果自动识图。开启后，当 `astrbot_plugin_image_generation` 完成任务并唤醒 AI 交付结果时，toolbox 会先识别生成图再注入摘要。
+- **image_generation_result_prompt_template**: 生图结果识图提示词模板，可用 `{task_id}`、`{image_index}`、`{image_count}` 占位。留空使用默认模板。
+- **image_generation_result_max_images**: 单次任务最多识别多少张生成图，默认 `1`。
 
 ### 📋 自动内容审核校正 (content_audit)
 

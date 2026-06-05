@@ -20,6 +20,7 @@ from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
 from .core.image_caption import ImageCaptionHandler
+from .core.image_generation_result import ImageGenerationResultHandler
 from .core.content_audit import ContentAuditLoop
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
@@ -152,6 +153,9 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
         for key in (
             "image_caption_hook_enabled",
             "image_caption_prompt_template",
+            "image_generation_result_hook_enabled",
+            "image_generation_result_prompt_template",
+            "image_generation_result_max_images",
         ):
             if key in image_caption_cfg:
                 incoming[key] = image_caption_cfg.get(key)
@@ -226,7 +230,7 @@ def _extract_grouped_runtime_config(raw: dict) -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.11",
+    "1.3.12",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -393,7 +397,21 @@ class ToolboxPlugin(Star):
         self.image_caption_prompt_template = str(
             self.config.get("image_caption_prompt_template", "") or ""
         ).strip()
+        self.image_generation_result_hook_enabled = self._safe_bool(
+            self.config.get("image_generation_result_hook_enabled", True),
+            True,
+        )
+        self.image_generation_result_prompt_template = str(
+            self.config.get("image_generation_result_prompt_template", "") or ""
+        ).strip()
+        self.image_generation_result_max_images = self._safe_int(
+            self.config.get("image_generation_result_max_images", 1),
+            1,
+            1,
+            10,
+        )
         self.image_caption_handler = ImageCaptionHandler(self)
+        self.image_generation_result_handler = ImageGenerationResultHandler(self)
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(
@@ -2056,6 +2074,9 @@ class ToolboxPlugin(Star):
         self, event: AstrMessageEvent, request: Any, *args, **kwargs
     ) -> None:
         try:
+            # ---- 生图完成结果后处理：为 image_generation 唤醒请求补充识图摘要 ----
+            await self.image_generation_result_handler.process(event, request)
+
             # ---- 图片转述前处理：接管图片转述，不让 AstrBot 处理 ----
             # 独立模块 ImageCaptionHandler 负责下载、降级、类型识别
             await self.image_caption_handler.process(event, request)
