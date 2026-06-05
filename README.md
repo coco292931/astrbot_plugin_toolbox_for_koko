@@ -129,7 +129,7 @@ astrbot_plugin_toolbox_for_koko/
 - **content_audit_fetch_rounds**: 审核时抓取的消息条数（默认 10）。
 - **content_audit_criteria**: 审核标准文本。定义 AI 回复应遵守的标准，LLM 将据此判断回复质量。
 - **content_audit_keywords**: 审核关键词列表（如 `["我不确定", "抱歉"]`）。AI 回复命中关键词时立即触发审核。
-- **content_audit_min_rounds**: 最小触发间隔轮数（默认 2）。两次审核之间最少间隔的轮数，避免刚审完又触发。设为 0 关闭。
+- **content_audit_min_interval**: 最小触发间隔轮数（默认 2）。两次审核之间最少间隔的轮数，避免刚审完又触发。设为 0 关闭。
 
 ## 🚀 智能化工具调用机制
 

@@ -22,6 +22,12 @@ class ImageGenerationResultHandler:
         "Please describe the generated image in Chinese. "
         "Focus on the main subjects, style, composition, colors, and notable details."
     )
+    _TASK_HISTORY_MARKER = "Output your last task result below."
+    _WAKE_PROMPT_MARKERS = (
+        "You are awakened because an image generation task you initiated earlier has completed.",
+        "Use `send_message_to_user` to deliver the image generation result now.",
+        "<image_generation_task_result>",
+    )
     _TASK_RESULT_PATTERN = re.compile(
         r"<image_generation_task_result>\s*(\{.*?\})\s*</image_generation_task_result>",
         re.DOTALL,
@@ -45,11 +51,11 @@ class ImageGenerationResultHandler:
         if not self.plugin.image_generation_result_hook_enabled:
             return
 
+        if not self._is_task_wakeup_request(request):
+            return
+
         payload = self._extract_task_payload(request)
         result_paths = self._extract_result_paths(request, payload)
-        for event_path in self._extract_generation_images_from_event(event):
-            if event_path not in result_paths:
-                result_paths.append(event_path)
         if not payload and not result_paths:
             return
 
@@ -213,7 +219,7 @@ class ImageGenerationResultHandler:
         return None
 
     def _extract_task_summary(self, request: Any) -> tuple[str, str]:
-        for text in self._iter_request_texts(request):
+        for text in self._iter_current_request_texts(request):
             match = self._TASK_SUMMARY_PATTERN.search(text)
             if match:
                 return match.group(1).strip(), match.group(2).strip().lower()
@@ -300,6 +306,38 @@ class ImageGenerationResultHandler:
                 text = str(getattr(part, "text", "") or "")
                 if text:
                     yield text
+
+    def _iter_current_request_texts(self, request: Any):
+        if hasattr(request, "prompt") and isinstance(request.prompt, str):
+            yield request.prompt
+        if hasattr(request, "system_prompt") and isinstance(request.system_prompt, str):
+            yield request.system_prompt
+        if hasattr(request, "extra_user_content_parts"):
+            for part in request.extra_user_content_parts:
+                text = str(getattr(part, "text", "") or "")
+                if text:
+                    yield text
+
+    def _is_task_wakeup_request(self, request: Any) -> bool:
+        for text in self._iter_current_request_texts(request):
+            if any(marker in text for marker in self._WAKE_PROMPT_MARKERS):
+                return True
+
+        image_urls = getattr(request, "image_urls", None)
+        if isinstance(image_urls, list) and image_urls:
+            for path in image_urls:
+                normalized = str(path or "").strip().lower()
+                if "astrbot_plugin_image_generation" in normalized or "/gen_" in normalized:
+                    return True
+
+        contexts = getattr(request, "contexts", None)
+        if isinstance(contexts, list):
+            for message in contexts:
+                for text in self._iter_message_texts(message):
+                    if self._TASK_HISTORY_MARKER in text:
+                        return False
+
+        return False
 
     def _iter_message_texts(self, message: Any):
         if isinstance(message, str):

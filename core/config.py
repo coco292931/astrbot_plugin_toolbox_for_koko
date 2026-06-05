@@ -160,11 +160,35 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             "content_audit_enabled",
             "content_audit_rounds",
             "content_audit_fetch_rounds",
+            "content_audit_min_interval",
             "content_audit_criteria",
+            "content_audit_keyword_enabled",
             "content_audit_keywords",
+            "content_audit_debug",
+            "content_audit_inject_mode",
         ):
             if key in content_audit_cfg:
                 incoming[key] = content_audit_cfg.get(key)
+
+        # Backward compatibility for older docs/configs that used the old key name.
+        if (
+            "content_audit_min_interval" not in incoming
+            and "content_audit_min_rounds" in content_audit_cfg
+        ):
+            incoming["content_audit_min_interval"] = content_audit_cfg.get(
+                "content_audit_min_rounds"
+            )
+
+    persona_audit_cfg = raw.get("persona_audit", {})
+    if isinstance(persona_audit_cfg, dict):
+        for key in (
+            "persona_audit_enabled",
+            "persona_audit_rounds",
+            "persona_audit_prompt",
+            "persona_audit_inject_mode",
+        ):
+            if key in persona_audit_cfg:
+                incoming[key] = persona_audit_cfg.get(key)
 
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")

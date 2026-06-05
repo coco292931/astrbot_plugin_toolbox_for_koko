@@ -238,7 +238,11 @@ class ContentAuditLoop:
             has_pending = self._pending_keyword.pop(key, False)
 
         if has_pending:
-            if current_count >= self._min_rounds:
+            if not self._keyword_audit_enabled:
+                self._log_debug(
+                    f"[ContentAudit] key={key} 有关键词保持位但关键词审核已关闭，丢弃"
+                )
+            elif current_count >= self._min_rounds:
                 should_trigger = True
                 trigger_reason = "保持位触发"
                 logger.info(
@@ -246,7 +250,6 @@ class ContentAuditLoop:
                     f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
                 )
             else:
-                # 保持位已消费但未达到最小轮数，重新设回等待下一轮
                 self._pending_keyword[key] = True
                 self._log_debug(
                     f"[ContentAudit] key={key} 保持位已消费但当前计数 "

@@ -304,7 +304,7 @@
             },
             "content_audit_fetch_rounds": {
                 "description": "审核抓取轮数",
-                "hint": "每次审核时从上下文取最近多少轮消息进行分析。建议 5-10。",
+                "hint": "每次审核时从上下文取最近多少轮消息进行分析。建议不低于触发轮数。",
                 "type": "int",
                 "default": 10,
                 "slider": {
