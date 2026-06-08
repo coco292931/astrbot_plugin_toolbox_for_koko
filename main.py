@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.4.1",
+    "1.4.2",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -1109,50 +1109,29 @@ class ToolboxPlugin(Star):
         if self.image_caption_tool_enabled:
             registry["tool_image_caption"] = {
                 "name": "tool_image_caption",
-                "description": "对一张或多张图片做识图/转述。支持本地路径、file://、http(s) URL、base64、data URL，以及当前消息内附图；可自定义提示词、system_prompt 和 provider_id。",
+                "description": "对一张或多张图片做识图/转述。支持分别通过 paths、urls、base64_list、data_urls 四类列表传图，也可回退使用当前消息内附图。可自定义 prompt 和 provider_id。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "image_inputs": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "通用图片输入列表。每项可为本地路径、file://、http(s) URL、base64 或 data URL。",
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "单个本地图片路径或 file:// 路径。",
-                        },
                         "paths": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "多个本地图片路径或 file:// 路径。",
-                        },
-                        "url": {
-                            "type": "string",
-                            "description": "单个 http(s) 图片 URL。",
+                            "description": "本地文件路径列表。每项为本地路径或 file:// 路径。",
                         },
                         "urls": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "多个 http(s) 图片 URL。",
+                            "description": "网络图片 URL 列表。每项为 http:// 或 https:// 图片地址。",
                         },
-                        "b64": {
-                            "type": "string",
-                            "description": "单个 base64 图片内容，支持纯 base64 或 data URL。",
-                        },
-                        "b64_list": {
+                        "base64_list": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "多个 base64 图片内容。",
-                        },
-                        "data_url": {
-                            "type": "string",
-                            "description": "单个 data:image/...;base64,... 输入。",
+                            "description": "base64 图片数据列表。每项为纯 base64 字符串，不含 data:image 前缀。",
                         },
                         "data_urls": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "多个 data:image/...;base64,... 输入。",
+                            "description": "data URL 图片列表。每项形如 data:image/png;base64,...。",
                         },
                         "use_event_images": {
                             "type": "boolean",
@@ -1160,11 +1139,7 @@ class ToolboxPlugin(Star):
                         },
                         "prompt": {
                             "type": "string",
-                            "description": "可选，自定义传给llm的提示词模板。支持 {image_type}、{index}、{total}、{source} 占位符。",
-                        },
-                        "system_prompt": {
-                            "type": "string",
-                            "description": "可选，自定义 system prompt。主要用于敏感内容兜底 Provider。",
+                            "description": "可选，自定义传给 LLM 的提示词模板。支持 {image_type}、{index}、{total}、{source} 占位符；敏感兜底链路也复用这份 prompt。",
                         },
                         "provider_id": {
                             "type": "string",
@@ -1181,8 +1156,8 @@ class ToolboxPlugin(Star):
                     "caption image",
                     "image caption",
                     "image describe",
+                    "图片列表",
                     "base64 图片",
-                    "图片路径",
                 ],
                 "handler": self._run_tool_image_caption,
             }
@@ -2100,37 +2075,25 @@ class ToolboxPlugin(Star):
     async def tool_image_caption(
         self,
         event: AstrMessageEvent,
-        image_inputs: list[str] | None = None,
-        path: str = "",
         paths: list[str] | None = None,
-        url: str = "",
         urls: list[str] | None = None,
-        b64: str = "",
-        b64_list: list[str] | None = None,
-        data_url: str = "",
+        base64_list: list[str] | None = None,
         data_urls: list[str] | None = None,
         use_event_images: bool = True,
         prompt: str = "",
-        system_prompt: str = "",
         provider_id: str = "",
     ) -> dict:
         """直接执行图片识图/转述。
 
-        支持本地路径、file://、http(s) URL、base64、data URL，以及当前消息内附图。
+        支持通过 paths、urls、base64_list、data_urls 四类列表传图，以及当前消息内附图。
 
         Args:
-            image_inputs(list[string]): 可选。通用图片输入列表。每项可为本地路径、file://、http(s) URL、base64 或 data URL。
-            path(string): 可选。单个本地图片路径或 file:// 路径。
-            paths(list[string]): 可选。多个本地图片路径或 file:// 路径。
-            url(string): 可选。单个 http(s) 图片 URL。
-            urls(list[string]): 可选。多个 http(s) 图片 URL。
-            b64(string): 可选。单个 base64 图片内容，支持纯 base64 或 data URL。
-            b64_list(list[string]): 可选。多个 base64 图片内容。
-            data_url(string): 可选。单个 data:image/...;base64,... 输入。
-            data_urls(list[string]): 可选。多个 data:image/...;base64,... 输入。
+            paths(list[string]): 可选。本地图片路径列表。每项可为本地路径或 file:// 路径。
+            urls(list[string]): 可选。网络图片 URL 列表。每项应为 http:// 或 https:// 图片地址。
+            base64_list(list[string]): 可选。base64 图片数据列表。每项为纯 base64 字符串，不含 data:image 前缀。
+            data_urls(list[string]): 可选。data URL 图片列表。每项形如 data:image/png;base64,...。
             use_event_images(boolean): 可选。未显式传图时是否回退使用当前消息内附图，默认 true。
-            prompt(string): 可选。自定义用户提示词模板，支持 {image_type}、{index}、{total}、{source} 占位符。
-            system_prompt(string): 可选。自定义 system prompt，主要用于敏感内容兜底 Provider。
+            prompt(string): 可选。统一传给 LLM 的提示词模板，支持 {image_type}、{index}、{total}、{source} 占位符；敏感兜底链路也复用这份 prompt。
             provider_id(string): 可选。指定用于识图的 AstrBot Provider ID；留空则沿用默认图片转述 Provider。
         """
         if not self.image_caption_tool_enabled:
@@ -2140,18 +2103,12 @@ class ToolboxPlugin(Star):
             }
 
         args = {
-            "image_inputs": image_inputs,
-            "path": path,
             "paths": paths,
-            "url": url,
             "urls": urls,
-            "b64": b64,
-            "b64_list": b64_list,
-            "data_url": data_url,
+            "base64_list": base64_list,
             "data_urls": data_urls,
             "use_event_images": use_event_images,
             "prompt": prompt,
-            "system_prompt": system_prompt,
             "provider_id": provider_id,
         }
         message = await self.image_caption_handler.caption_tool(event, args)

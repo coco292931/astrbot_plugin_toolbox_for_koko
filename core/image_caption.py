@@ -409,18 +409,14 @@ class ImageCaptionHandler:
                 return
             entries.append({"kind": kind, "value": text})
 
-        for key in ("image_inputs", "images", "image", "paths", "path", "files", "file"):
-            for item in self._normalize_string_items(args.get(key)):
-                add_entry("mixed", item)
-        for key in ("urls", "url"):
-            for item in self._normalize_string_items(args.get(key)):
-                add_entry("url", item)
-        for key in ("b64_list", "b64", "base64", "base64_list"):
-            for item in self._normalize_string_items(args.get(key)):
-                add_entry("b64", item)
-        for key in ("data_urls", "data_url"):
-            for item in self._normalize_string_items(args.get(key)):
-                add_entry("data_url", item)
+        for item in self._normalize_string_items(args.get("paths")):
+            add_entry("path", item)
+        for item in self._normalize_string_items(args.get("urls")):
+            add_entry("url", item)
+        for item in self._normalize_string_items(args.get("base64_list")):
+            add_entry("b64", item)
+        for item in self._normalize_string_items(args.get("data_urls")):
+            add_entry("data_url", item)
 
         if not entries and bool(args.get("use_event_images", True)):
             for item in self._collect_event_image_urls(event):
@@ -431,15 +427,6 @@ class ImageCaptionHandler:
         for entry in entries:
             kind = entry["kind"]
             value = entry["value"]
-            if kind == "mixed":
-                if self._looks_like_data_url(value):
-                    kind = "data_url"
-                elif self._decode_base64_image(value):
-                    kind = "b64"
-                elif self._is_network_url(value):
-                    kind = "url"
-                else:
-                    kind = "path"
             key = (kind, value)
             if key in seen:
                 continue
@@ -496,7 +483,6 @@ class ImageCaptionHandler:
         img_url: str,
         img_type: str,
         prompt: str | None = None,
-        system_prompt: str | None = None,
         local_path: str | None = None,
     ) -> str | None:
         if not getattr(self.plugin, "image_caption_sensitive_fallback_enabled", False):
@@ -515,15 +501,19 @@ class ImageCaptionHandler:
                 logger.debug(f"[ImageCaption] 准备敏感兜底图片失败: {e}")
                 return None
 
-        resolved_system_prompt = system_prompt or (
+        sensitive_prefix = str(
             getattr(
                 self.plugin,
                 "image_caption_sensitive_fallback_system_prompt",
                 "",
             )
-            or self.DEFAULT_SENSITIVE_SYSTEM_PROMPT
-        )
-        resolved_prompt = prompt or self.DEFAULT_SENSITIVE_USER_PROMPT
+            or ""
+        ).strip()
+        resolved_prompt = str(prompt or "").strip() or self.DEFAULT_SENSITIVE_USER_PROMPT
+        if sensitive_prefix:
+            resolved_prompt = f"{sensitive_prefix}\n\n{resolved_prompt}".strip()
+        elif not prompt:
+            resolved_prompt = f"{self.DEFAULT_SENSITIVE_SYSTEM_PROMPT}\n\n{resolved_prompt}".strip()
         max_tokens = int(
             getattr(self.plugin, "image_caption_sensitive_fallback_max_tokens", 300)
             or 300
@@ -539,7 +529,6 @@ class ImageCaptionHandler:
             try:
                 caption = await provider.text_chat(
                     prompt=resolved_prompt,
-                    system_prompt=resolved_system_prompt,
                     image_urls=[prepared_local_path],
                     persist=False,
                     max_tokens=max_tokens,
@@ -563,10 +552,9 @@ class ImageCaptionHandler:
     async def caption_tool(self, event: AstrMessageEvent, args: dict) -> str:
         entries = await self._normalize_tool_image_entries(event, args)
         if not entries:
-            return "未找到可用图片输入。请提供 path/paths、url/urls、b64/b64_list、data_url/data_urls，或在消息中直接附图。"
+            return "未找到可用图片输入。请提供 urls 列表，或在消息中直接附图。"
 
         provider_id = str(args.get("provider_id", "") or "").strip()
-        system_prompt = str(args.get("system_prompt", "") or "").strip()
         prompt_template = str(args.get("prompt", "") or "").strip()
         if provider_id:
             provider = self.plugin.context.get_provider_by_id(provider_id)
@@ -669,7 +657,6 @@ class ImageCaptionHandler:
                         raw_value if kind == "url" else (local_path or raw_value),
                         image_type,
                         prompt=prompt,
-                        system_prompt=system_prompt,
                         local_path=local_path,
                     )
 

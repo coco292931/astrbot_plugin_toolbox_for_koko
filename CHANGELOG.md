@@ -6,7 +6,7 @@
 
 - **图片转述失败错误透传与策略分流（`core/image_caption.py`）**：
   - 运行时 patch AstrBot 的 `_ensure_img_caption()`，在保留 `[Image Captioning Failed]` 标记的同时，把原始异常透传到插件上下文中，供后续判断与提示词注入使用。
-  - 新增同级 LLM 工具 `tool_image_caption`，支持直接传入本地路径、`file://`、`http(s)` URL、base64、data URL 或消息附图做识图/转述；并支持自定义提示词、`system_prompt` 和 `provider_id`。
+  - 新增同级 LLM 工具 `tool_image_caption`，支持分别通过 `paths`、`urls`、`base64_list`、`data_urls` 四类列表或消息附图做识图/转述；并支持自定义提示词和 `provider_id`。
   - 新增 `image_caption_parse_error_keywords` 配置项。命中如“图片输入格式/解析错误”、`1210`、`invalid image` 等关键词时，跳过 URL 直传转述，直接走下载/压缩/GIF 取帧降级。
   - 新增 `image_caption_sensitive_error_keywords` 配置项。命中如“不安全”、`敏感内容`、`content filter`等关键词时，触发敏感内容兜底识图。
   - 新增 `image_caption_tool_enabled`、`image_caption_sensitive_fallback_enabled`、`image_caption_sensitive_fallback_provider_ids`、`image_caption_sensitive_fallback_system_prompt`、`image_caption_sensitive_fallback_max_tokens` 配置项，支持按顺序调用已配置的 AstrBot 图片 Provider 做敏感内容兜底识图。
@@ -14,7 +14,7 @@
 ### 🔧 变更
 
 - **图片转述失败日志降级**：AstrBot 图片转述失败的插件侧 patch 日志由 `error` 调整为 `debug`，避免与 Core 原生日志混淆。
-- **敏感内容兜底实现收敛到 AstrBot Provider 体系**：不再要求插件侧额外维护 JSON/HTTP 中转配置，直接复用 AstrBot 已配置 Provider 的 `text_chat(..., system_prompt=...)` 调用链。
+- **敏感内容兜底提示词收敛为单一 prompt**：不再区分工具入参级别的 `system_prompt`；敏感内容前置提示会直接拼接进最终发给 LLM 的转述 prompt，再复用 AstrBot 已配置 Provider 的图片调用链。
 
 ## [1.3.2] - 2026-05-27
 

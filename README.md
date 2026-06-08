@@ -114,13 +114,13 @@ astrbot_plugin_toolbox_for_koko/
 ### 🖼️ 图片转述后处理 (image_caption)
 
 - **image_caption_hook_enabled**: 启用图片转述后处理。开启后检测 AstrBot 图片转述失败并自动降级。关闭时不影响群聊上下文中的图片转述。
-- **image_caption_tool_enabled**: 启用同级 LLM 工具 `tool_image_caption`。开启后可直接传入路径、URL、base64、data URL 或消息附图做识图/转述。
+- **image_caption_tool_enabled**: 启用同级 LLM 工具 `tool_image_caption`。开启后可分别通过 `paths`、`urls`、`base64_list`、`data_urls` 四类列表，或直接使用消息附图做识图/转述。
 - **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型。留空使用默认模板。
 - **image_caption_parse_error_keywords**: 解析错误关键词列表。默认已预填常见格式/解析错误关键词；命中后跳过 URL 直传，直接走下载/压缩/GIF 取帧降级。
 - **image_caption_sensitive_fallback_enabled**: 启用敏感内容兜底识图。当 AstrBot 因不安全/敏感内容等错误拒绝图片转述时，尝试改走已配置的 AstrBot Provider 列表。
 - **image_caption_sensitive_error_keywords**: 敏感错误关键词列表。默认已预填常见敏感/安全拒绝关键词；命中后才触发敏感内容兜底 Provider。
 - **image_caption_sensitive_fallback_provider_ids**: 敏感内容兜底 Provider ID 列表。按顺序填写 AstrBot 中已配置好的支持图片输入的 Provider。
-- **image_caption_sensitive_fallback_system_prompt**: 敏感内容兜底 Provider 的系统提示词。留空使用插件内置默认系统提示词，不影响普通 GIF/图片转述提示词。
+- **image_caption_sensitive_fallback_system_prompt**: 敏感内容兜底 Provider 的前置提示词。留空使用插件内置默认前置提示；运行时会与实际发送给 LLM 的图片转述提示词拼接，不再区分单独工具入参。
 - **image_caption_sensitive_fallback_max_tokens**: 敏感内容兜底 Provider 调用的 `max_tokens`，默认 `300`。
 - **image_generation_result_hook_enabled**: 启用生图结果自动识图。开启后，当 `astrbot_plugin_image_generation` 完成任务并唤醒 AI 交付结果时，toolbox 会先识别生成图再注入摘要。
 - **image_generation_result_prompt_template**: 生图结果识图提示词模板，可用 `{task_id}`、`{image_index}`、`{image_count}` 占位。留空使用默认模板。

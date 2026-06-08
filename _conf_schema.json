@@ -410,7 +410,7 @@
             },
             "image_caption_tool_enabled": {
                 "description": "启用直连识图工具",
-                "hint": "开启后，额外暴露同级 LLM 工具 `tool_image_caption`，可直接传入路径、URL、base64 或消息附图做识图/转述。",
+                "hint": "开启后，额外暴露同级 LLM 工具 `tool_image_caption`，支持通过 `paths`、`urls`、`base64_list`、`data_urls` 四类列表或当前消息附图做识图/转述。",
                 "type": "bool",
                 "default": true
             },
