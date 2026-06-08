@@ -41,6 +41,38 @@ class ImageCaptionHandler:
 
     # 默认提示词模板
     DEFAULT_PROMPT_TEMPLATE = "Please describe the {image_type} using Chinese."
+    DEFAULT_SENSITIVE_SYSTEM_PROMPT = """## Workflow (思维链) - 关键步骤
+在生成最终输出之前，模型必须执行以下内部流程：
+1. **全景场景映射:** 将整个场景视为一张地图进行可视化。识别所有层次：背景 -> 中景物体 -> 前景主体。
+2. **主体与对象清单:** 列出图像中所有独立实体。对每个实体记录关键属性。
+3. **互动与环境分析:** 分析实体之间的关系。识别哪些吸引人、引人注目的物体。
+4. **氛围与构图检查:** 注意光线、色调、拍摄角度和整体情绪。
+注意：请贴合图片实际描述。禁止模糊词语。"""
+    DEFAULT_SENSITIVE_USER_PROMPT = "先判断图片类型并尽可能详细描述图片内容。"
+    FORMAT_PARSE_ERROR_KEYWORDS = (
+        "图片输入格式/解析错误",
+        "图片解析错误",
+        "image input format",
+        "image parse error",
+        "invalid image",
+        "unsupported image",
+        "failed to parse image",
+        "unable to parse image",
+        "code': '1210'",
+        'code": "1210"',
+    )
+    SENSITIVE_ERROR_KEYWORDS = (
+        "不安全",
+        "敏感内容",
+        "unsafe",
+        "sensitive",
+        "content filter",
+        "contentfilter",
+        "content policy",
+        "safety",
+        "code': '1301'",
+        'code": "1301"',
+    )
     ERROR_BLOCK_PATTERN = re.compile(
         r"<toolbox_image_caption_error>\s*(\{.*?\})\s*</toolbox_image_caption_error>",
         re.DOTALL,
@@ -97,7 +129,7 @@ class ImageCaptionHandler:
                     )
                     req.image_urls = []
             except Exception as exc:  # noqa: BLE001
-                logger.error("处理图片描述失败: %s", exc)
+                logger.debug("[ImageCaptionPatch] 处理图片描述失败: %s", exc)
                 error_payload = {
                     "provider_id": str(image_caption_provider or "").strip(),
                     "error": str(exc).strip(),
@@ -162,6 +194,149 @@ class ImageCaptionHandler:
             "</toolbox_image_caption_failure_context>"
         )
 
+    def _matches_error_keywords(
+        self, error_text: str, keywords: tuple[str, ...]
+    ) -> bool:
+        normalized = str(error_text or "").casefold()
+        if not normalized:
+            return False
+        return any(keyword.casefold() in normalized for keyword in keywords)
+
+    def _should_skip_direct_url_retry(self, error_text: str) -> bool:
+        keywords = tuple(
+            getattr(self.plugin, "image_caption_parse_error_keywords", []) or []
+        ) or self.FORMAT_PARSE_ERROR_KEYWORDS
+        return self._matches_error_keywords(
+            error_text,
+            keywords,
+        )
+
+    def _should_try_sensitive_fallback(self, error_text: str) -> bool:
+        keywords = tuple(
+            getattr(self.plugin, "image_caption_sensitive_error_keywords", []) or []
+        ) or self.SENSITIVE_ERROR_KEYWORDS
+        return self._matches_error_keywords(
+            error_text,
+            keywords,
+        )
+
+    def _load_sensitive_fallback_provider_ids(self) -> list[str]:
+        provider_ids = getattr(
+            self.plugin,
+            "image_caption_sensitive_fallback_provider_ids",
+            [],
+        )
+        if not isinstance(provider_ids, list):
+            return []
+        return [str(v).strip() for v in provider_ids if str(v).strip()]
+
+    async def _prepare_local_image_path(self, img_url: str) -> str:
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from astrbot.core.utils.io import download_image_by_url
+        from PIL import Image as PILImage
+
+        local_path = await download_image_by_url(img_url)
+        compress_enabled, max_size, quality = self._get_compress_config()
+        if compress_enabled:
+            local_path = await compress_image(
+                local_path,
+                max_size=max_size,
+                quality=quality,
+            )
+
+        with PILImage.open(local_path) as pil_img:
+            if getattr(pil_img, "is_animated", False):
+                pil_img.seek(0)
+                frame = pil_img.convert("RGB")
+                frame_path = os.path.join(
+                    get_astrbot_temp_path(),
+                    f"kc_img_{uuid.uuid4()}.jpg",
+                )
+                frame.save(frame_path, "JPEG", quality=quality)
+                local_path = frame_path
+        return local_path
+
+    async def _caption_local_path(
+        self,
+        provider: Any,
+        local_path: str,
+        prompt: str,
+        img_type: str,
+    ) -> str | None:
+        caption = await provider.text_chat(
+            prompt=prompt,
+            image_urls=[local_path],
+            persist=False,
+        )
+        if caption and caption.completion_text:
+            text = caption.completion_text.strip()
+            logger.info(f"[ImageCaption] 降级转述成功: {img_type}")
+            return f"[{img_type}: {text}]"
+        return None
+
+    async def _try_sensitive_fallback_models(
+        self,
+        img_url: str,
+        img_type: str,
+    ) -> str | None:
+        if not getattr(self.plugin, "image_caption_sensitive_fallback_enabled", False):
+            return None
+
+        provider_ids = self._load_sensitive_fallback_provider_ids()
+        if not provider_ids:
+            logger.debug("[ImageCaption] 未配置敏感内容兜底模型，跳过")
+            return None
+
+        try:
+            local_path = await self._prepare_local_image_path(img_url)
+        except Exception as e:
+            logger.debug(f"[ImageCaption] 准备敏感兜底图片失败: {e}")
+            return None
+
+        system_prompt = (
+            getattr(
+                self.plugin,
+                "image_caption_sensitive_fallback_system_prompt",
+                "",
+            )
+            or self.DEFAULT_SENSITIVE_SYSTEM_PROMPT
+        )
+        max_tokens = int(
+            getattr(self.plugin, "image_caption_sensitive_fallback_max_tokens", 300)
+            or 300
+        )
+
+        for provider_id in provider_ids:
+            provider = self.plugin.context.get_provider_by_id(provider_id)
+            if not provider:
+                logger.debug(
+                    f"[ImageCaption] 敏感兜底 Provider 不存在，跳过: {provider_id}"
+                )
+                continue
+            try:
+                caption = await provider.text_chat(
+                    prompt=self.DEFAULT_SENSITIVE_USER_PROMPT,
+                    system_prompt=system_prompt,
+                    image_urls=[local_path],
+                    persist=False,
+                    max_tokens=max_tokens,
+                )
+                if not caption or not getattr(caption, "completion_text", ""):
+                    logger.debug(
+                        f"[ImageCaption] 敏感兜底 Provider {provider_id} 返回空内容"
+                    )
+                    continue
+                text = caption.completion_text.strip()
+                logger.info(
+                    f"[ImageCaption] 敏感兜底 Provider {provider_id} 转述成功: {img_type}"
+                )
+                return f"[{img_type}: {text}]"
+            except Exception as e:
+                logger.debug(
+                    f"[ImageCaption] 敏感兜底 Provider {provider_id} 调用异常: {e}"
+                )
+        return None
+
     def _get_compress_config(self) -> tuple[bool, int, int]:
         """从 AstrBot 配置读取图片压缩参数。"""
         try:
@@ -196,11 +371,18 @@ class ImageCaptionHandler:
 
         failure_payload = self._extract_failure_payload(request)
         failure_context = self._build_failure_context(failure_payload)
+        failure_error = failure_payload.get("error", "") if failure_payload else ""
+        skip_direct_url_retry = self._should_skip_direct_url_retry(failure_error)
+        try_sensitive_fallback = self._should_try_sensitive_fallback(failure_error)
         if failure_payload and failure_payload.get("error"):
             logger.info(
                 "[ImageCaption] 捕获到 AstrBot 原始转述错误: "
                 f"{failure_payload.get('error', '')}"
             )
+        if skip_direct_url_retry:
+            logger.info("[ImageCaption] 命中图片格式/解析错误，跳过 URL 转述直传")
+        if try_sensitive_fallback:
+            logger.info("[ImageCaption] 命中敏感内容错误，尝试自定义兜底模型")
 
         # 从原始消息提取图片 URL 和类型
         image_infos: list[tuple[str, str]] = []
@@ -236,7 +418,7 @@ class ImageCaptionHandler:
             request.extra_user_content_parts = cleaned_parts
 
         provider = await self._resolve_caption_provider()
-        if not provider:
+        if not provider and not try_sensitive_fallback:
             logger.warning("[ImageCaption] 未找到可用图片转述 Provider，跳过降级")
             return
 
@@ -267,9 +449,23 @@ class ImageCaptionHandler:
                     image_type=img_type
                 )
 
-            caption_tag = await self._transcribe_one(
-                provider, img_url, caption_prompt, img_type
-            )
+            caption_tag = None
+            if try_sensitive_fallback:
+                caption_tag = await self._try_sensitive_fallback_models(
+                    img_url,
+                    img_type,
+                )
+
+            if not caption_tag and provider:
+                caption_tag = await self._transcribe_one(
+                    provider,
+                    img_url,
+                    caption_prompt,
+                    img_type,
+                    skip_direct_url_retry=skip_direct_url_retry,
+                )
+            if not caption_tag:
+                caption_tag = f"[{img_type}]"
 
             # 追加转述结果
             if hasattr(request, "extra_user_content_parts"):
@@ -304,57 +500,38 @@ class ImageCaptionHandler:
         return None
 
     async def _transcribe_one(
-        self, provider: Any, img_url: str, prompt: str, img_type: str
+        self,
+        provider: Any,
+        img_url: str,
+        prompt: str,
+        img_type: str,
+        skip_direct_url_retry: bool = False,
     ) -> str:
         """转述单张图片，失败时降级处理。"""
-        # 尝试直接 URL 转述
-        try:
-            caption = await provider.text_chat(
-                prompt=prompt,
-                image_urls=[img_url],
-                persist=False,
-            )
-            if caption and caption.completion_text:
-                text = caption.completion_text.strip()
-                logger.info(f"[ImageCaption] 转述成功: {img_type}")
-                return f"[{img_type}: {text}]"
-        except Exception as e:
-            logger.debug(f"[ImageCaption] URL 转述失败: {e}")
-
-        # 降级：下载 → PIL 取帧 → 本地路径重试
-        try:
-            from astrbot.core.utils.io import download_image_by_url
-            from PIL import Image as PILImage
-            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
-
-            local_path = await download_image_by_url(img_url)
-            # 下载后压缩（读取 AstrBot 配置）
-            compress_enabled, max_size, quality = self._get_compress_config()
-            if compress_enabled:
-                local_path = await compress_image(
-                    local_path, max_size=max_size, quality=quality
+        if not skip_direct_url_retry:
+            try:
+                caption = await provider.text_chat(
+                    prompt=prompt,
+                    image_urls=[img_url],
+                    persist=False,
                 )
-            # GIF 多帧处理
-            with PILImage.open(local_path) as pil_img:
-                if getattr(pil_img, "is_animated", False):
-                    pil_img.seek(0)
-                    frame = pil_img.convert("RGB")
-                    frame_path = os.path.join(
-                        get_astrbot_temp_path(),
-                        f"kc_img_{uuid.uuid4()}.jpg",
-                    )
-                    frame.save(frame_path, "JPEG", quality=quality)
-                    local_path = frame_path
+                if caption and caption.completion_text:
+                    text = caption.completion_text.strip()
+                    logger.info(f"[ImageCaption] 转述成功: {img_type}")
+                    return f"[{img_type}: {text}]"
+            except Exception as e:
+                logger.debug(f"[ImageCaption] URL 转述失败: {e}")
 
-            caption2 = await provider.text_chat(
-                prompt=prompt,
-                image_urls=[local_path],
-                persist=False,
+        try:
+            local_path = await self._prepare_local_image_path(img_url)
+            caption2 = await self._caption_local_path(
+                provider,
+                local_path,
+                prompt,
+                img_type,
             )
-            if caption2 and caption2.completion_text:
-                text = caption2.completion_text.strip()
-                logger.info(f"[ImageCaption] 降级转述成功: {img_type}")
-                return f"[{img_type}: {text}]"
+            if caption2:
+                return caption2
         except Exception as e:
             logger.debug(f"[ImageCaption] 降级转述失败: {e}")
 

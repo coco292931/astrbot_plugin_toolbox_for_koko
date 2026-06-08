@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.16",
+    "1.3.17",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -400,6 +400,28 @@ class ToolboxPlugin(Star):
         self.image_caption_prompt_template = str(
             self.config.get("image_caption_prompt_template", "") or ""
         ).strip()
+        self.image_caption_parse_error_keywords = self._parse_string_list(
+            self.config.get("image_caption_parse_error_keywords", [])
+        )
+        self.image_caption_sensitive_fallback_enabled = self._safe_bool(
+            self.config.get("image_caption_sensitive_fallback_enabled", False),
+            False,
+        )
+        self.image_caption_sensitive_error_keywords = self._parse_string_list(
+            self.config.get("image_caption_sensitive_error_keywords", [])
+        )
+        self.image_caption_sensitive_fallback_provider_ids = self._parse_string_list(
+            self.config.get("image_caption_sensitive_fallback_provider_ids", [])
+        )
+        self.image_caption_sensitive_fallback_system_prompt = str(
+            self.config.get("image_caption_sensitive_fallback_system_prompt", "") or ""
+        ).strip()
+        self.image_caption_sensitive_fallback_max_tokens = self._safe_int(
+            self.config.get("image_caption_sensitive_fallback_max_tokens", 300),
+            300,
+            32,
+            4096,
+        )
         self.image_generation_result_hook_enabled = self._safe_bool(
             self.config.get("image_generation_result_hook_enabled", True),
             True,
@@ -689,6 +711,29 @@ class ToolboxPlugin(Star):
         items = [str(v).strip() for v in raw_value if str(v).strip()]
         # 去重并保持顺序
         return list(dict.fromkeys(items))
+
+    def _parse_string_list(self, raw_value: Any) -> list[str]:
+        """解析字符串列表，支持 list 或 JSON 数组字符串。"""
+        items: list[Any] = []
+        if isinstance(raw_value, list):
+            items = raw_value
+        elif isinstance(raw_value, str):
+            raw_text = raw_value.strip()
+            if not raw_text:
+                return []
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                items = [v.strip() for v in raw_text.split(",") if v.strip()]
+        else:
+            return []
+
+        normalized = [str(v).strip() for v in items if str(v).strip()]
+        return list(dict.fromkeys(normalized))
 
     @filter.event_message_type(
         filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,

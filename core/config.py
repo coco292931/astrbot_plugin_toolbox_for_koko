@@ -114,6 +114,12 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
         for key in (
             "image_caption_hook_enabled",
             "image_caption_prompt_template",
+            "image_caption_parse_error_keywords",
+            "image_caption_sensitive_fallback_enabled",
+            "image_caption_sensitive_error_keywords",
+            "image_caption_sensitive_fallback_provider_ids",
+            "image_caption_sensitive_fallback_system_prompt",
+            "image_caption_sensitive_fallback_max_tokens",
             "image_generation_result_hook_enabled",
             "image_generation_result_prompt_template",
             "image_generation_result_max_images",

@@ -413,6 +413,71 @@
                 "type": "string",
                 "default": ""
             },
+            "image_caption_parse_error_keywords": {
+                "description": "解析错误关键词列表",
+                "hint": "命中这些关键词时，跳过 URL 直传转述，直接走下载/压缩/GIF 取帧降级。默认内置包含“图片输入格式/解析错误”、1210、invalid image 等。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": [
+                    "图片输入格式/解析错误",
+                    "图片解析错误",
+                    "image input format",
+                    "image parse error",
+                    "invalid image",
+                    "unsupported image",
+                    "failed to parse image",
+                    "unable to parse image",
+                    "1210"
+                ]
+            },
+            "image_caption_sensitive_fallback_enabled": {
+                "description": "启用敏感内容兜底识图",
+                "hint": "当 AstrBot 图片转述因不安全/敏感内容等错误失败时，尝试使用下方 AstrBot Provider 列表做兜底识图。",
+                "type": "bool",
+                "default": false
+            },
+            "image_caption_sensitive_error_keywords": {
+                "description": "敏感错误关键词列表",
+                "hint": "命中这些关键词时，尝试依次调用敏感内容兜底 Provider。默认内置包含“不安全”、 “敏感内容”、content filter、1301 等。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": [
+                    "不安全",
+                    "敏感内容",
+                    "unsafe",
+                    "sensitive",
+                    "content filter",
+                    "contentfilter",
+                    "content policy",
+                    "safety",
+                    "1301"
+                ]
+            },
+            "image_caption_sensitive_fallback_provider_ids": {
+                "description": "敏感内容兜底 Provider 列表",
+                "hint": "按顺序填写 AstrBot 中已配置好的支持图片输入的 Provider ID。命中敏感内容错误时将依次尝试这些 Provider。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "image_caption_sensitive_fallback_system_prompt": {
+                "description": "敏感内容兜底系统提示词",
+                "hint": "留空使用插件内置系统提示词；该提示词仅用于敏感内容兜底 Provider，不影响 GIF/普通转述提示词。",
+                "type": "string",
+                "default": ""
+            },
+            "image_caption_sensitive_fallback_max_tokens": {
+                "description": "敏感内容兜底最大输出 Tokens",
+                "hint": "AstrBot Provider 兜底识图调用的 max_tokens，默认 300。",
+                "type": "int",
+                "default": 300
+            },
             "image_generation_result_hook_enabled": {
                 "description": "启用生图结果自动识图",
                 "hint": "开启后，当 astrbot_plugin_image_generation 完成任务并唤醒 AI 时，toolbox 会先对生成图做识图摘要并注入上下文。",
