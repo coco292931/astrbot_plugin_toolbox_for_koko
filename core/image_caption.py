@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import uuid
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -230,6 +232,221 @@ class ImageCaptionHandler:
             return []
         return [str(v).strip() for v in provider_ids if str(v).strip()]
 
+    def _normalize_string_items(self, raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            text = raw.strip()
+            return [text] if text else []
+        if isinstance(raw, dict):
+            items: list[str] = []
+            for key in ("path", "file", "url", "b64", "data_url", "value"):
+                items.extend(self._normalize_string_items(raw.get(key)))
+            return items
+        if isinstance(raw, (list, tuple, set)):
+            items: list[str] = []
+            for item in raw:
+                items.extend(self._normalize_string_items(item))
+            return items
+        text = str(raw).strip()
+        return [text] if text else []
+
+    def _normalize_local_path_value(self, value: str) -> str:
+        value = value.strip()
+        if not value.lower().startswith("file:"):
+            return value
+        parsed = urlparse(value)
+        if parsed.scheme.lower() != "file":
+            return value
+        netloc = unquote(parsed.netloc)
+        path = unquote(parsed.path)
+        if netloc and netloc.lower() != "localhost" and path:
+            path = f"//{netloc}{path}"
+        elif netloc and netloc.lower() != "localhost":
+            path = netloc
+        if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        return os.path.normpath(path)
+
+    def _is_network_url(self, value: str) -> bool:
+        scheme = urlparse(str(value or "")).scheme.lower()
+        return scheme in {"http", "https"}
+
+    def _resolve_local_path(self, value: str) -> str | None:
+        normalized = self._normalize_local_path_value(value)
+        candidates: list[Path] = []
+        path_obj = Path(normalized)
+        if path_obj.is_absolute():
+            candidates.append(path_obj)
+        else:
+            candidates.append(Path.cwd() / normalized)
+            data_dir = getattr(self.plugin, "data_dir", None)
+            if data_dir:
+                candidates.append(Path(data_dir) / normalized)
+            candidates.append(Path(__file__).resolve().parent.parent / normalized)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            if resolved.exists() and resolved.is_file():
+                return str(resolved)
+        return None
+
+    def _looks_like_data_url(self, value: str) -> bool:
+        return str(value or "").strip().lower().startswith("data:image/")
+
+    def _decode_base64_image(self, value: str) -> tuple[bytes, str] | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        mime_type = "image/png"
+        payload = text
+        if self._looks_like_data_url(text):
+            header, sep, body = text.partition(",")
+            if not sep:
+                return None
+            payload = body.strip()
+            mime_match = re.match(r"data:([^;,]+)", header, re.I)
+            if mime_match:
+                mime_type = mime_match.group(1).strip().lower()
+
+        payload = re.sub(r"\s+", "", payload)
+        try:
+            import base64
+
+            data = base64.b64decode(payload, validate=True)
+        except Exception:
+            return None
+        if not data:
+            return None
+        return data, mime_type
+
+    def _mime_to_suffix(self, mime_type: str) -> str:
+        lowered = str(mime_type or "").lower()
+        if lowered == "image/jpeg":
+            return ".jpg"
+        if lowered == "image/gif":
+            return ".gif"
+        if lowered == "image/webp":
+            return ".webp"
+        return ".png"
+
+    def _detect_image_type(
+        self,
+        *,
+        source_text: str = "",
+        mime_type: str = "",
+        local_path: str = "",
+    ) -> str:
+        lowered = " ".join(
+            part.lower() for part in (source_text, mime_type, local_path) if part
+        )
+        if ".gif" in lowered or "image/gif" in lowered:
+            return "GIF"
+        if "sticker" in lowered or "表情" in lowered or "emoji" in lowered:
+            return "表情包"
+        return "图片"
+
+    def _build_caption_prompt(
+        self,
+        prompt_template: str,
+        *,
+        image_type: str,
+        index: int,
+        total: int,
+        source: str,
+    ) -> str:
+        try:
+            return prompt_template.format(
+                image_type=image_type,
+                index=index,
+                total=total,
+                source=source,
+            )
+        except KeyError:
+            return prompt_template
+
+    async def _write_temp_image_bytes(self, data: bytes, mime_type: str) -> str:
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+        suffix = self._mime_to_suffix(mime_type)
+        path = os.path.join(get_astrbot_temp_path(), f"kc_manual_{uuid.uuid4()}{suffix}")
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def _collect_event_image_urls(self, event: AstrMessageEvent) -> list[str]:
+        image_urls: list[str] = []
+        try:
+            messages = event.get_messages() or []
+        except Exception:
+            messages = []
+        for comp in messages:
+            if isinstance(comp, MsgImage):
+                candidate = str(comp.url or comp.file or "").strip()
+                if candidate:
+                    image_urls.append(candidate)
+        return image_urls
+
+    async def _normalize_tool_image_entries(
+        self,
+        event: AstrMessageEvent,
+        args: dict,
+    ) -> list[dict[str, str]]:
+        entries: list[dict[str, str]] = []
+
+        def add_entry(kind: str, value: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            entries.append({"kind": kind, "value": text})
+
+        for key in ("image_inputs", "images", "image", "paths", "path", "files", "file"):
+            for item in self._normalize_string_items(args.get(key)):
+                add_entry("mixed", item)
+        for key in ("urls", "url"):
+            for item in self._normalize_string_items(args.get(key)):
+                add_entry("url", item)
+        for key in ("b64_list", "b64", "base64", "base64_list"):
+            for item in self._normalize_string_items(args.get(key)):
+                add_entry("b64", item)
+        for key in ("data_urls", "data_url"):
+            for item in self._normalize_string_items(args.get(key)):
+                add_entry("data_url", item)
+
+        if not entries and bool(args.get("use_event_images", True)):
+            for item in self._collect_event_image_urls(event):
+                add_entry("url", item)
+
+        normalized: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in entries:
+            kind = entry["kind"]
+            value = entry["value"]
+            if kind == "mixed":
+                if self._looks_like_data_url(value):
+                    kind = "data_url"
+                elif self._decode_base64_image(value):
+                    kind = "b64"
+                elif self._is_network_url(value):
+                    kind = "url"
+                else:
+                    kind = "path"
+            key = (kind, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"kind": kind, "value": value})
+        return normalized
+
     async def _prepare_local_image_path(self, img_url: str) -> str:
         from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
         from astrbot.core.utils.io import download_image_by_url
@@ -278,6 +495,9 @@ class ImageCaptionHandler:
         self,
         img_url: str,
         img_type: str,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        local_path: str | None = None,
     ) -> str | None:
         if not getattr(self.plugin, "image_caption_sensitive_fallback_enabled", False):
             return None
@@ -287,13 +507,15 @@ class ImageCaptionHandler:
             logger.debug("[ImageCaption] 未配置敏感内容兜底模型，跳过")
             return None
 
-        try:
-            local_path = await self._prepare_local_image_path(img_url)
-        except Exception as e:
-            logger.debug(f"[ImageCaption] 准备敏感兜底图片失败: {e}")
-            return None
+        prepared_local_path = local_path
+        if not prepared_local_path:
+            try:
+                prepared_local_path = await self._prepare_local_image_path(img_url)
+            except Exception as e:
+                logger.debug(f"[ImageCaption] 准备敏感兜底图片失败: {e}")
+                return None
 
-        system_prompt = (
+        resolved_system_prompt = system_prompt or (
             getattr(
                 self.plugin,
                 "image_caption_sensitive_fallback_system_prompt",
@@ -301,6 +523,7 @@ class ImageCaptionHandler:
             )
             or self.DEFAULT_SENSITIVE_SYSTEM_PROMPT
         )
+        resolved_prompt = prompt or self.DEFAULT_SENSITIVE_USER_PROMPT
         max_tokens = int(
             getattr(self.plugin, "image_caption_sensitive_fallback_max_tokens", 300)
             or 300
@@ -315,9 +538,9 @@ class ImageCaptionHandler:
                 continue
             try:
                 caption = await provider.text_chat(
-                    prompt=self.DEFAULT_SENSITIVE_USER_PROMPT,
-                    system_prompt=system_prompt,
-                    image_urls=[local_path],
+                    prompt=resolved_prompt,
+                    system_prompt=resolved_system_prompt,
+                    image_urls=[prepared_local_path],
                     persist=False,
                     max_tokens=max_tokens,
                 )
@@ -336,6 +559,125 @@ class ImageCaptionHandler:
                     f"[ImageCaption] 敏感兜底 Provider {provider_id} 调用异常: {e}"
                 )
         return None
+
+    async def caption_tool(self, event: AstrMessageEvent, args: dict) -> str:
+        entries = await self._normalize_tool_image_entries(event, args)
+        if not entries:
+            return "未找到可用图片输入。请提供 path/paths、url/urls、b64/b64_list、data_url/data_urls，或在消息中直接附图。"
+
+        provider_id = str(args.get("provider_id", "") or "").strip()
+        system_prompt = str(args.get("system_prompt", "") or "").strip()
+        prompt_template = str(args.get("prompt", "") or "").strip()
+        if provider_id:
+            provider = self.plugin.context.get_provider_by_id(provider_id)
+            if not provider:
+                return f"未找到 provider_id={provider_id} 对应的 Provider。"
+        else:
+            provider = await self._resolve_caption_provider()
+        if not provider:
+            return "未找到可用图片转述 Provider。"
+
+        if not prompt_template:
+            prompt_template = self.plugin.image_caption_prompt_template or ""
+        if not prompt_template:
+            try:
+                cfg = self.plugin.context.get_config()
+                prompt_template = str(
+                    cfg.get("provider_settings", {}).get("image_caption_prompt", "") or ""
+                ).strip()
+            except Exception:
+                prompt_template = ""
+        if not prompt_template:
+            prompt_template = self.DEFAULT_PROMPT_TEMPLATE
+
+        lines: list[str] = []
+        total = len(entries)
+        for index, entry in enumerate(entries, start=1):
+            kind = entry["kind"]
+            raw_value = entry["value"]
+            source_label = raw_value[:120]
+            image_type = self._detect_image_type(source_text=raw_value)
+            prompt = self._build_caption_prompt(
+                prompt_template,
+                image_type=image_type,
+                index=index,
+                total=total,
+                source=source_label,
+            )
+
+            caption_tag: str | None = None
+            local_path: str | None = None
+            try:
+                if kind == "url":
+                    caption_tag = await self._transcribe_one(
+                        provider,
+                        raw_value,
+                        prompt,
+                        image_type,
+                    )
+                elif kind == "path":
+                    local_path = self._resolve_local_path(raw_value)
+                    if not local_path:
+                        caption_tag = f"[{image_type}]"
+                    else:
+                        image_type = self._detect_image_type(
+                            source_text=raw_value,
+                            local_path=local_path,
+                        )
+                        prompt = self._build_caption_prompt(
+                            prompt_template,
+                            image_type=image_type,
+                            index=index,
+                            total=total,
+                            source=source_label,
+                        )
+                        caption_tag = await self._caption_local_path(
+                            provider,
+                            local_path,
+                            prompt,
+                            image_type,
+                        )
+                elif kind in {"b64", "data_url"}:
+                    decoded = self._decode_base64_image(raw_value)
+                    if not decoded:
+                        caption_tag = f"[{image_type}]"
+                    else:
+                        data, mime_type = decoded
+                        image_type = self._detect_image_type(
+                            source_text=raw_value[:32],
+                            mime_type=mime_type,
+                        )
+                        prompt = self._build_caption_prompt(
+                            prompt_template,
+                            image_type=image_type,
+                            index=index,
+                            total=total,
+                            source=f"{kind}:{index}",
+                        )
+                        local_path = await self._write_temp_image_bytes(data, mime_type)
+                        caption_tag = await self._caption_local_path(
+                            provider,
+                            local_path,
+                            prompt,
+                            image_type,
+                        )
+            except Exception as e:
+                logger.debug(f"[ImageCaption] 手动转述失败(kind={kind}): {e}")
+                failure_text = str(e)
+                if self._should_try_sensitive_fallback(failure_text):
+                    caption_tag = await self._try_sensitive_fallback_models(
+                        raw_value if kind == "url" else (local_path or raw_value),
+                        image_type,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        local_path=local_path,
+                    )
+
+            if not caption_tag:
+                caption_tag = f"[{image_type}]"
+            lines.append(f"{index}. {caption_tag}")
+
+        return "\n".join(lines)
 
     def _get_compress_config(self) -> tuple[bool, int, int]:
         """从 AstrBot 配置读取图片压缩参数。"""

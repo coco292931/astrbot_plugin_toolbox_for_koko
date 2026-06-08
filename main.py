@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.3.17",
+    "1.4.0",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -396,6 +396,9 @@ class ToolboxPlugin(Star):
         # 图片转述前处理（在 on_llm_request 中接管图片转述）
         self.image_caption_hook_enabled = self._safe_bool(
             self.config.get("image_caption_hook_enabled", True), True
+        )
+        self.image_caption_tool_enabled = self._safe_bool(
+            self.config.get("image_caption_tool_enabled", True), True
         )
         self.image_caption_prompt_template = str(
             self.config.get("image_caption_prompt_template", "") or ""
@@ -2008,6 +2011,49 @@ class ToolboxPlugin(Star):
             "message": msg,
             "tool_names": list(available_tools.keys()),
         }
+
+    @filter.llm_tool(name="tool_image_caption")
+    async def tool_image_caption(
+        self,
+        event: AstrMessageEvent,
+        image_inputs: Any = None,
+        path: str = "",
+        paths: Any = None,
+        url: str = "",
+        urls: Any = None,
+        b64: str = "",
+        b64_list: Any = None,
+        data_url: str = "",
+        data_urls: Any = None,
+        use_event_images: bool = True,
+        prompt: str = "",
+        system_prompt: str = "",
+        provider_id: str = "",
+    ) -> dict:
+        """直接执行图片识图/转述。支持 path/url/base64/data URL/消息附图输入。"""
+        if not self.image_caption_tool_enabled:
+            return {
+                "status": "error",
+                "message": "tool_image_caption 已被配置禁用。",
+            }
+
+        args = {
+            "image_inputs": image_inputs,
+            "path": path,
+            "paths": paths,
+            "url": url,
+            "urls": urls,
+            "b64": b64,
+            "b64_list": b64_list,
+            "data_url": data_url,
+            "data_urls": data_urls,
+            "use_event_images": use_event_images,
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+            "provider_id": provider_id,
+        }
+        message = await self.image_caption_handler.caption_tool(event, args)
+        return {"status": "success", "message": message}
 
     @llm_tool("run_koko_tool")
     async def run_koko_tool(

@@ -113,6 +113,7 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
     if isinstance(image_caption_cfg, dict):
         for key in (
             "image_caption_hook_enabled",
+            "image_caption_tool_enabled",
             "image_caption_prompt_template",
             "image_caption_parse_error_keywords",
             "image_caption_sensitive_fallback_enabled",

@@ -1,14 +1,15 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
-## [Unreleased]
+## [1.4.0]
 
 ### ✨ 新增
 
 - **图片转述失败错误透传与策略分流（`core/image_caption.py`）**：
   - 运行时 patch AstrBot 的 `_ensure_img_caption()`，在保留 `[Image Captioning Failed]` 标记的同时，把原始异常透传到插件上下文中，供后续判断与提示词注入使用。
+  - 新增同级 LLM 工具 `tool_image_caption`，支持直接传入本地路径、`file://`、`http(s)` URL、base64、data URL 或消息附图做识图/转述；并支持自定义提示词、`system_prompt` 和 `provider_id`。
   - 新增 `image_caption_parse_error_keywords` 配置项。命中如“图片输入格式/解析错误”、`1210`、`invalid image` 等关键词时，跳过 URL 直传转述，直接走下载/压缩/GIF 取帧降级。
   - 新增 `image_caption_sensitive_error_keywords` 配置项。命中如“不安全”、`敏感内容`、`content filter`、`1301` 等关键词时，触发敏感内容兜底识图。
-  - 新增 `image_caption_sensitive_fallback_enabled`、`image_caption_sensitive_fallback_provider_ids`、`image_caption_sensitive_fallback_system_prompt`、`image_caption_sensitive_fallback_max_tokens` 配置项，支持按顺序调用已配置的 AstrBot 图片 Provider 做敏感内容兜底识图。
+  - 新增 `image_caption_tool_enabled`、`image_caption_sensitive_fallback_enabled`、`image_caption_sensitive_fallback_provider_ids`、`image_caption_sensitive_fallback_system_prompt`、`image_caption_sensitive_fallback_max_tokens` 配置项，支持按顺序调用已配置的 AstrBot 图片 Provider 做敏感内容兜底识图。
 
 ### 🔧 变更
 

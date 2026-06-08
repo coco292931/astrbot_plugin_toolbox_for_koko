@@ -405,7 +405,14 @@
             "image_caption_hook_enabled": {
                 "description": "启用图片回退转述",
                 "hint": "开启后，自动对 AstrBot 处理失败的图片重试",
-                "type": "bool",                "default": true
+                "type": "bool",
+                "default": true
+            },
+            "image_caption_tool_enabled": {
+                "description": "启用直连识图工具",
+                "hint": "开启后，额外暴露同级 LLM 工具 `tool_image_caption`，可直接传入路径、URL、base64 或消息附图做识图/转述。",
+                "type": "bool",
+                "default": true
             },
             "image_caption_prompt_template": {
                 "description": "图片转述提示词模板",
@@ -421,15 +428,14 @@
                     "type": "string"
                 },
                 "default": [
-                    "图片输入格式/解析错误",
-                    "图片解析错误",
-                    "image input format",
-                    "image parse error",
+                    "解析错误",
+                    "格式错误",
+                    "input format",
+                    "parse error",
                     "invalid image",
                     "unsupported image",
                     "failed to parse image",
-                    "unable to parse image",
-                    "1210"
+                    "unable to parse image"
                 ]
             },
             "image_caption_sensitive_fallback_enabled": {
@@ -440,12 +446,19 @@
             },
             "image_caption_sensitive_error_keywords": {
                 "description": "敏感错误关键词列表",
-                "hint": "命中这些关键词时，尝试依次调用敏感内容兜底 Provider。默认内置包含“不安全”、 “敏感内容”、content filter、1301 等。",
+                "hint": "命中这些关键词时，尝试依次调用敏感内容兜底 Provider。",
                 "type": "list",
                 "items": {
                     "type": "string"
                 },
                 "default": [
+                    "reject", 
+                    "deny", 
+                    "forbid", 
+                    "不通过", 
+                    "违规",
+                    "拒绝",
+                    "不允许",
                     "不安全",
                     "敏感内容",
                     "unsafe",
@@ -453,8 +466,7 @@
                     "content filter",
                     "contentfilter",
                     "content policy",
-                    "safety",
-                    "1301"
+                    "safety"
                 ]
             },
             "image_caption_sensitive_fallback_provider_ids": {
@@ -479,7 +491,7 @@
                 "default": 300
             },
             "image_generation_result_hook_enabled": {
-                "description": "启用生图结果自动识图",
+                "description": "启用生图结果自动识图（未实现）",
                 "hint": "开启后，当 astrbot_plugin_image_generation 完成任务并唤醒 AI 时，toolbox 会先对生成图做识图摘要并注入上下文。",
                 "type": "bool",
                 "default": true

@@ -114,6 +114,7 @@ astrbot_plugin_toolbox_for_koko/
 ### 🖼️ 图片转述后处理 (image_caption)
 
 - **image_caption_hook_enabled**: 启用图片转述后处理。开启后检测 AstrBot 图片转述失败并自动降级。关闭时不影响群聊上下文中的图片转述。
+- **image_caption_tool_enabled**: 启用同级 LLM 工具 `tool_image_caption`。开启后可直接传入路径、URL、base64、data URL 或消息附图做识图/转述。
 - **image_caption_prompt_template**: 图片转述提示词模板，可用 `{image_type}` 代表图片类型。留空使用默认模板。
 - **image_caption_parse_error_keywords**: 解析错误关键词列表。默认已预填常见格式/解析错误关键词；命中后跳过 URL 直传，直接走下载/压缩/GIF 取帧降级。
 - **image_caption_sensitive_fallback_enabled**: 启用敏感内容兜底识图。当 AstrBot 因不安全/敏感内容等错误拒绝图片转述时，尝试改走已配置的 AstrBot Provider 列表。
