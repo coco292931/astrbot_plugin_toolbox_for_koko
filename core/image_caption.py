@@ -23,7 +23,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import uuid
 from typing import Any
 
@@ -39,9 +41,126 @@ class ImageCaptionHandler:
 
     # 默认提示词模板
     DEFAULT_PROMPT_TEMPLATE = "Please describe the {image_type} using Chinese."
+    ERROR_BLOCK_PATTERN = re.compile(
+        r"<toolbox_image_caption_error>\s*(\{.*?\})\s*</toolbox_image_caption_error>",
+        re.DOTALL,
+    )
+    _PATCH_FLAG = "_toolbox_image_caption_error_patch_installed"
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
+        self._install_astrbot_caption_error_patch()
+
+    def _install_astrbot_caption_error_patch(self) -> None:
+        """运行时 patch AstrBot，把原始图片转述异常透传到 request。"""
+        try:
+            from astrbot.core import astr_main_agent as astr_main_agent
+            from astrbot.core.agent.message import TextPart as CoreTextPart
+        except Exception as e:
+            logger.debug(f"[ImageCaption] 安装 AstrBot 转述错误补丁失败: {e}")
+            return
+
+        current = getattr(astr_main_agent, "_ensure_img_caption", None)
+        if current is None:
+            logger.debug("[ImageCaption] 未找到 AstrBot _ensure_img_caption，跳过补丁")
+            return
+        if getattr(current, self._PATCH_FLAG, False):
+            return
+
+        async def patched_ensure_img_caption(
+            event: Any,
+            req: Any,
+            cfg: dict,
+            plugin_context: Any,
+            image_caption_provider: str,
+        ) -> None:
+            try:
+                compressed_urls = []
+                for url in req.image_urls:
+                    compressed_url = await astr_main_agent._compress_image_for_provider(
+                        url, cfg
+                    )
+                    compressed_urls.append(compressed_url)
+                    if astr_main_agent._is_generated_compressed_image_path(
+                        url, compressed_url
+                    ):
+                        event.track_temporary_local_file(compressed_url)
+                caption = await astr_main_agent._request_img_caption(
+                    image_caption_provider,
+                    cfg,
+                    compressed_urls,
+                    plugin_context,
+                )
+                if caption:
+                    req.extra_user_content_parts.append(
+                        CoreTextPart(text=f"<image_caption>{caption}</image_caption>")
+                    )
+                    req.image_urls = []
+            except Exception as exc:  # noqa: BLE001
+                logger.error("处理图片描述失败: %s", exc)
+                error_payload = {
+                    "provider_id": str(image_caption_provider or "").strip(),
+                    "error": str(exc).strip(),
+                }
+                req.extra_user_content_parts.append(
+                    CoreTextPart(
+                        text=(
+                            "<toolbox_image_caption_error>"
+                            f"{json.dumps(error_payload, ensure_ascii=False)}"
+                            "</toolbox_image_caption_error>"
+                        )
+                    )
+                )
+                req.extra_user_content_parts.append(
+                    CoreTextPart(text="[Image Captioning Failed]")
+                )
+            finally:
+                req.image_urls = []
+
+        setattr(patched_ensure_img_caption, self._PATCH_FLAG, True)
+        setattr(patched_ensure_img_caption, "__wrapped__", current)
+        astr_main_agent._ensure_img_caption = patched_ensure_img_caption
+        logger.info("[ImageCaption] 已安装 AstrBot 图片转述错误透传补丁")
+
+    def _extract_failure_payload(self, request: Any) -> dict[str, str] | None:
+        if not hasattr(request, "extra_user_content_parts"):
+            return None
+
+        for part in request.extra_user_content_parts:
+            text = str(getattr(part, "text", "") or "")
+            if not text or "<toolbox_image_caption_error>" not in text:
+                continue
+            match = self.ERROR_BLOCK_PATTERN.search(text)
+            if not match:
+                continue
+            try:
+                payload = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return {
+                    "provider_id": str(payload.get("provider_id", "") or "").strip(),
+                    "error": str(payload.get("error", "") or "").strip(),
+                }
+        return None
+
+    def _build_failure_context(self, payload: dict[str, str] | None) -> str | None:
+        if not payload:
+            return None
+
+        provider_id = payload.get("provider_id", "")
+        error_text = payload.get("error", "")
+        if not error_text:
+            return None
+
+        provider_line = f"Provider: {provider_id}\n" if provider_id else ""
+        return (
+            "<toolbox_image_caption_failure_context>\n"
+            "以下是 AstrBot 原始图片转述失败信息，请结合该失败原因理解后续图片内容：\n"
+            f"{provider_line}"
+            f"Error: {error_text}\n"
+            "</toolbox_image_caption_failure_context>"
+        )
 
     def _get_compress_config(self) -> tuple[bool, int, int]:
         """从 AstrBot 配置读取图片压缩参数。"""
@@ -75,6 +194,14 @@ class ImageCaptionHandler:
         if not has_failure:
             return
 
+        failure_payload = self._extract_failure_payload(request)
+        failure_context = self._build_failure_context(failure_payload)
+        if failure_payload and failure_payload.get("error"):
+            logger.info(
+                "[ImageCaption] 捕获到 AstrBot 原始转述错误: "
+                f"{failure_payload.get('error', '')}"
+            )
+
         # 从原始消息提取图片 URL 和类型
         image_infos: list[tuple[str, str]] = []
         for comp in event.get_messages():
@@ -97,9 +224,15 @@ class ImageCaptionHandler:
             cleaned_parts = []
             for part in request.extra_user_content_parts:
                 text = str(getattr(part, "text", ""))
-                if "[Image Attachment:" in text or "[Image Captioning Failed]" in text:
+                if (
+                    "[Image Attachment:" in text
+                    or "[Image Captioning Failed]" in text
+                    or "<toolbox_image_caption_error>" in text
+                ):
                     continue  # 丢弃，后续用转述结果替换
                 cleaned_parts.append(part)
+            if failure_context:
+                cleaned_parts.append(TextPart(text=failure_context))
             request.extra_user_content_parts = cleaned_parts
 
         provider = await self._resolve_caption_provider()

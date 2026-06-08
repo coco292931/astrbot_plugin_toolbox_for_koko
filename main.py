@@ -78,152 +78,155 @@ def _load_schema_defaults() -> dict:
         return {}
 
 
-def _extract_grouped_runtime_config(raw: dict) -> dict:
-    """只读取新的分组配置结构，并拍平成运行时键值；本次更新补充支持 interaction 配置组。"""
-    if not isinstance(raw, dict):
-        return {}
-
-    incoming = {}
-
-    for key in (
-        "enable_weather",
-        "enable_search",
-        "enable_history",
-        "enable_fetch_url",
-    ):
-        if key in raw:
-            incoming[key] = raw.get(key)
-
-    weather_cfg = raw.get("weather", {})
-    if isinstance(weather_cfg, dict):
-        for key in (
-            "qweather_key",
-            "qweather_jwt_token",
-            "qweather_weather_host",
-            "qweather_geo_host",
-            "enable_weather_summary",
-            "weather_summary_prompt",
-            "weather_summary_llm_provider_id",
-        ):
-            if key in weather_cfg:
-                incoming[key] = weather_cfg.get(key)
-
-    search_cfg = raw.get("search", {})
-    if isinstance(search_cfg, dict):
-        for key in ("zhipu_key", "zhipu_search_model", "zhipu_search_intent"):
-            if key in search_cfg:
-                incoming[key] = search_cfg.get(key)
-
-    web_fetch_cfg = raw.get("web_fetch", {})
-    if isinstance(web_fetch_cfg, dict):
-        for key in (
-            "enable_fetch_url",
-            "fetch_url_max_chars",
-            "fetch_url_blocked_targets",
-            "fetch_url_max_redirects",
-            "fetch_url_over_limit_mode",
-            "fetch_url_summary_prompt",
-            "fetch_url_summary_llm_provider_id",
-            "fetch_url_max_download_bytes",
-        ):
-            if key in web_fetch_cfg:
-                incoming[key] = web_fetch_cfg.get(key)
-
-    interaction_cfg = raw.get("interaction", {})
-    if isinstance(interaction_cfg, dict):
-        for key in (
-            "enable_keyword_capture_reply",
-            "keyword_capture_words",
-            "keyword_capture_reply_probability",
-            "keyword_capture_base_probability",
-            "keyword_capture_whitelist",
-            "keyword_capture_session_mode",
-            "keyword_capture_manage_context",
-            "keyword_capture_context_max_cnt",
-            "keyword_capture_context_history_limit",
-            "keyword_capture_context_image_limit",
-            "keyword_capture_context_prompt",
-            "keyword_capture_bypass_probability_on_at",
-        ):
-            if key in interaction_cfg:
-                incoming[key] = interaction_cfg.get(key)
-
-    image_caption_cfg = raw.get("image_caption", {})
-    if isinstance(image_caption_cfg, dict):
-        for key in (
-            "image_caption_hook_enabled",
-            "image_caption_prompt_template",
-            "image_generation_result_hook_enabled",
-            "image_generation_result_prompt_template",
-            "image_generation_result_max_images",
-        ):
-            if key in image_caption_cfg:
-                incoming[key] = image_caption_cfg.get(key)
-
-    memory_cfg = raw.get("memory", {})
-    if isinstance(memory_cfg, dict):
-        for key in (
-            "max_memories_per_user",
-            "enable_admin_tool_memory_command",
-            "memory_inject_enabled",
-            "memory_inject_count",
-        ):
-            if key in memory_cfg:
-                incoming[key] = memory_cfg.get(key)
-
-    mnemosyne_cfg = raw.get("mnemosyne", {})
-    if isinstance(mnemosyne_cfg, dict):
-        for key in (
-            "embedding_provider_id",
-            "milvus_lite_path",
-            "address",
-            "db_name",
-            "collection_name",
-            "use_session_filtering",
-            "platform_blacklist",
-        ):
-            if key in mnemosyne_cfg:
-                incoming[key] = mnemosyne_cfg.get(key)
-        auth_cfg = mnemosyne_cfg.get("authentication")
-        if isinstance(auth_cfg, dict):
-            # 透传认证结构，保持与 Mnemosyne 配置一致
-            incoming["authentication"] = {
-                "token": auth_cfg.get("token", ""),
-                "user": auth_cfg.get("user", ""),
-                "password": auth_cfg.get("password", ""),
-            }
-
-    content_audit_cfg = raw.get("content_audit", {})
-    if isinstance(content_audit_cfg, dict):
-        for key in (
-            "content_audit_enabled",
-            "content_audit_rounds",
-            "content_audit_fetch_rounds",
-            "content_audit_min_interval",
-            "content_audit_criteria",
-            "content_audit_keyword_enabled",
-            "content_audit_keywords",
-            "content_audit_debug",
-            "content_audit_inject_mode",
-        ):
-            if key in content_audit_cfg:
-                incoming[key] = content_audit_cfg.get(key)
-
-    persona_audit_cfg = raw.get("persona_audit", {})
-    if isinstance(persona_audit_cfg, dict):
-        for key in (
-            "persona_audit_enabled",
-            "persona_audit_rounds",
-            "persona_audit_prompt",
-            "persona_audit_inject_mode",
-        ):
-            if key in persona_audit_cfg:
-                incoming[key] = persona_audit_cfg.get(key)
-
-    if "summary_prompt" in raw:
-        incoming["summary_prompt"] = raw.get("summary_prompt")
-
-    return incoming
+# Deprecated duplicate kept commented for historical reference only.
+# Runtime config flattening is imported from core/config.py at module import time.
+#
+# def _extract_grouped_runtime_config(raw: dict) -> dict:
+#     """只读取新的分组配置结构，并拍平成运行时键值；本次更新补充支持 interaction 配置组。"""
+#     if not isinstance(raw, dict):
+#         return {}
+#
+#     incoming = {}
+#
+#     for key in (
+#         "enable_weather",
+#         "enable_search",
+#         "enable_history",
+#         "enable_fetch_url",
+#     ):
+#         if key in raw:
+#             incoming[key] = raw.get(key)
+#
+#     weather_cfg = raw.get("weather", {})
+#     if isinstance(weather_cfg, dict):
+#         for key in (
+#             "qweather_key",
+#             "qweather_jwt_token",
+#             "qweather_weather_host",
+#             "qweather_geo_host",
+#             "enable_weather_summary",
+#             "weather_summary_prompt",
+#             "weather_summary_llm_provider_id",
+#         ):
+#             if key in weather_cfg:
+#                 incoming[key] = weather_cfg.get(key)
+#
+#     search_cfg = raw.get("search", {})
+#     if isinstance(search_cfg, dict):
+#         for key in ("zhipu_key", "zhipu_search_model", "zhipu_search_intent"):
+#             if key in search_cfg:
+#                 incoming[key] = search_cfg.get(key)
+#
+#     web_fetch_cfg = raw.get("web_fetch", {})
+#     if isinstance(web_fetch_cfg, dict):
+#         for key in (
+#             "enable_fetch_url",
+#             "fetch_url_max_chars",
+#             "fetch_url_blocked_targets",
+#             "fetch_url_max_redirects",
+#             "fetch_url_over_limit_mode",
+#             "fetch_url_summary_prompt",
+#             "fetch_url_summary_llm_provider_id",
+#             "fetch_url_max_download_bytes",
+#         ):
+#             if key in web_fetch_cfg:
+#                 incoming[key] = web_fetch_cfg.get(key)
+#
+#     interaction_cfg = raw.get("interaction", {})
+#     if isinstance(interaction_cfg, dict):
+#         for key in (
+#             "enable_keyword_capture_reply",
+#             "keyword_capture_words",
+#             "keyword_capture_reply_probability",
+#             "keyword_capture_base_probability",
+#             "keyword_capture_whitelist",
+#             "keyword_capture_session_mode",
+#             "keyword_capture_manage_context",
+#             "keyword_capture_context_max_cnt",
+#             "keyword_capture_context_history_limit",
+#             "keyword_capture_context_image_limit",
+#             "keyword_capture_context_prompt",
+#             "keyword_capture_bypass_probability_on_at",
+#         ):
+#             if key in interaction_cfg:
+#                 incoming[key] = interaction_cfg.get(key)
+#
+#     image_caption_cfg = raw.get("image_caption", {})
+#     if isinstance(image_caption_cfg, dict):
+#         for key in (
+#             "image_caption_hook_enabled",
+#             "image_caption_prompt_template",
+#             "image_generation_result_hook_enabled",
+#             "image_generation_result_prompt_template",
+#             "image_generation_result_max_images",
+#         ):
+#             if key in image_caption_cfg:
+#                 incoming[key] = image_caption_cfg.get(key)
+#
+#     memory_cfg = raw.get("memory", {})
+#     if isinstance(memory_cfg, dict):
+#         for key in (
+#             "max_memories_per_user",
+#             "enable_admin_tool_memory_command",
+#             "memory_inject_enabled",
+#             "memory_inject_count",
+#         ):
+#             if key in memory_cfg:
+#                 incoming[key] = memory_cfg.get(key)
+#
+#     mnemosyne_cfg = raw.get("mnemosyne", {})
+#     if isinstance(mnemosyne_cfg, dict):
+#         for key in (
+#             "embedding_provider_id",
+#             "milvus_lite_path",
+#             "address",
+#             "db_name",
+#             "collection_name",
+#             "use_session_filtering",
+#             "platform_blacklist",
+#         ):
+#             if key in mnemosyne_cfg:
+#                 incoming[key] = mnemosyne_cfg.get(key)
+#         auth_cfg = mnemosyne_cfg.get("authentication")
+#         if isinstance(auth_cfg, dict):
+#             # 透传认证结构，保持与 Mnemosyne 配置一致
+#             incoming["authentication"] = {
+#                 "token": auth_cfg.get("token", ""),
+#                 "user": auth_cfg.get("user", ""),
+#                 "password": auth_cfg.get("password", ""),
+#             }
+#
+#     content_audit_cfg = raw.get("content_audit", {})
+#     if isinstance(content_audit_cfg, dict):
+#         for key in (
+#             "content_audit_enabled",
+#             "content_audit_rounds",
+#             "content_audit_fetch_rounds",
+#             "content_audit_min_interval",
+#             "content_audit_criteria",
+#             "content_audit_keyword_enabled",
+#             "content_audit_keywords",
+#             "content_audit_debug",
+#             "content_audit_inject_mode",
+#         ):
+#             if key in content_audit_cfg:
+#                 incoming[key] = content_audit_cfg.get(key)
+#
+#     persona_audit_cfg = raw.get("persona_audit", {})
+#     if isinstance(persona_audit_cfg, dict):
+#         for key in (
+#             "persona_audit_enabled",
+#             "persona_audit_rounds",
+#             "persona_audit_prompt",
+#             "persona_audit_inject_mode",
+#         ):
+#             if key in persona_audit_cfg:
+#                 incoming[key] = persona_audit_cfg.get(key)
+#
+#     if "summary_prompt" in raw:
+#         incoming["summary_prompt"] = raw.get("summary_prompt")
+#
+#     return incoming
 
 
 @register(
