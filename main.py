@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.4.0",
+    "1.4.1",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -1106,6 +1106,87 @@ class ToolboxPlugin(Star):
                 "handler": self._run_tool_fetch_url,
             }
 
+        if self.image_caption_tool_enabled:
+            registry["tool_image_caption"] = {
+                "name": "tool_image_caption",
+                "description": "对一张或多张图片做识图/转述。支持本地路径、file://、http(s) URL、base64、data URL，以及当前消息内附图；可自定义提示词、system_prompt 和 provider_id。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_inputs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "通用图片输入列表。每项可为本地路径、file://、http(s) URL、base64 或 data URL。",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "单个本地图片路径或 file:// 路径。",
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "多个本地图片路径或 file:// 路径。",
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "单个 http(s) 图片 URL。",
+                        },
+                        "urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "多个 http(s) 图片 URL。",
+                        },
+                        "b64": {
+                            "type": "string",
+                            "description": "单个 base64 图片内容，支持纯 base64 或 data URL。",
+                        },
+                        "b64_list": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "多个 base64 图片内容。",
+                        },
+                        "data_url": {
+                            "type": "string",
+                            "description": "单个 data:image/...;base64,... 输入。",
+                        },
+                        "data_urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "多个 data:image/...;base64,... 输入。",
+                        },
+                        "use_event_images": {
+                            "type": "boolean",
+                            "description": "当未显式传入图片时，是否回退使用当前消息内附图。默认 true。",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "可选，自定义传给llm的提示词模板。支持 {image_type}、{index}、{total}、{source} 占位符。",
+                        },
+                        "system_prompt": {
+                            "type": "string",
+                            "description": "可选，自定义 system prompt。主要用于敏感内容兜底 Provider。",
+                        },
+                        "provider_id": {
+                            "type": "string",
+                            "description": "可选，指定用于识图的 AstrBot Provider ID；留空则沿用默认图片转述 Provider。",
+                        },
+                    },
+                    "required": [],
+                },
+                "keywords": [
+                    "识图",
+                    "图片转述",
+                    "图像转述",
+                    "看图",
+                    "caption image",
+                    "image caption",
+                    "image describe",
+                    "base64 图片",
+                    "图片路径",
+                ],
+                "handler": self._run_tool_image_caption,
+            }
+
         if self.enable_history:
             registry["tool_history"] = {
                 "name": "tool_history",
@@ -1769,6 +1850,9 @@ class ToolboxPlugin(Star):
     async def _run_tool_fetch_url(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_fetch_url(self, event, args)
 
+    async def _run_tool_image_caption(self, event: AstrMessageEvent, args: dict) -> str:
+        return await self.image_caption_handler.caption_tool(event, args)
+
     async def _run_tool_history(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_history(self, event, args)
 
@@ -2016,21 +2100,39 @@ class ToolboxPlugin(Star):
     async def tool_image_caption(
         self,
         event: AstrMessageEvent,
-        image_inputs: Any = None,
+        image_inputs: list[str] | None = None,
         path: str = "",
-        paths: Any = None,
+        paths: list[str] | None = None,
         url: str = "",
-        urls: Any = None,
+        urls: list[str] | None = None,
         b64: str = "",
-        b64_list: Any = None,
+        b64_list: list[str] | None = None,
         data_url: str = "",
-        data_urls: Any = None,
+        data_urls: list[str] | None = None,
         use_event_images: bool = True,
         prompt: str = "",
         system_prompt: str = "",
         provider_id: str = "",
     ) -> dict:
-        """直接执行图片识图/转述。支持 path/url/base64/data URL/消息附图输入。"""
+        """直接执行图片识图/转述。
+
+        支持本地路径、file://、http(s) URL、base64、data URL，以及当前消息内附图。
+
+        Args:
+            image_inputs(list[string]): 可选。通用图片输入列表。每项可为本地路径、file://、http(s) URL、base64 或 data URL。
+            path(string): 可选。单个本地图片路径或 file:// 路径。
+            paths(list[string]): 可选。多个本地图片路径或 file:// 路径。
+            url(string): 可选。单个 http(s) 图片 URL。
+            urls(list[string]): 可选。多个 http(s) 图片 URL。
+            b64(string): 可选。单个 base64 图片内容，支持纯 base64 或 data URL。
+            b64_list(list[string]): 可选。多个 base64 图片内容。
+            data_url(string): 可选。单个 data:image/...;base64,... 输入。
+            data_urls(list[string]): 可选。多个 data:image/...;base64,... 输入。
+            use_event_images(boolean): 可选。未显式传图时是否回退使用当前消息内附图，默认 true。
+            prompt(string): 可选。自定义用户提示词模板，支持 {image_type}、{index}、{total}、{source} 占位符。
+            system_prompt(string): 可选。自定义 system prompt，主要用于敏感内容兜底 Provider。
+            provider_id(string): 可选。指定用于识图的 AstrBot Provider ID；留空则沿用默认图片转述 Provider。
+        """
         if not self.image_caption_tool_enabled:
             return {
                 "status": "error",
