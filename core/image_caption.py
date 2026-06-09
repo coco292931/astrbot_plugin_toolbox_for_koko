@@ -205,18 +205,22 @@ class ImageCaptionHandler:
         return any(keyword.casefold() in normalized for keyword in keywords)
 
     def _should_skip_direct_url_retry(self, error_text: str) -> bool:
-        keywords = tuple(
-            getattr(self.plugin, "image_caption_parse_error_keywords", []) or []
-        ) or self.FORMAT_PARSE_ERROR_KEYWORDS
+        keywords = (
+            tuple(getattr(self.plugin, "image_caption_parse_error_keywords", []) or [])
+            or self.FORMAT_PARSE_ERROR_KEYWORDS
+        )
         return self._matches_error_keywords(
             error_text,
             keywords,
         )
 
     def _should_try_sensitive_fallback(self, error_text: str) -> bool:
-        keywords = tuple(
-            getattr(self.plugin, "image_caption_sensitive_error_keywords", []) or []
-        ) or self.SENSITIVE_ERROR_KEYWORDS
+        keywords = (
+            tuple(
+                getattr(self.plugin, "image_caption_sensitive_error_keywords", []) or []
+            )
+            or self.SENSITIVE_ERROR_KEYWORDS
+        )
         return self._matches_error_keywords(
             error_text,
             keywords,
@@ -378,7 +382,9 @@ class ImageCaptionHandler:
         from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
         suffix = self._mime_to_suffix(mime_type)
-        path = os.path.join(get_astrbot_temp_path(), f"kc_manual_{uuid.uuid4()}{suffix}")
+        path = os.path.join(
+            get_astrbot_temp_path(), f"kc_manual_{uuid.uuid4()}{suffix}"
+        )
         with open(path, "wb") as f:
             f.write(data)
         return path
@@ -509,11 +515,15 @@ class ImageCaptionHandler:
             )
             or ""
         ).strip()
-        resolved_prompt = str(prompt or "").strip() or self.DEFAULT_SENSITIVE_USER_PROMPT
+        resolved_prompt = (
+            str(prompt or "").strip() or self.DEFAULT_SENSITIVE_USER_PROMPT
+        )
         if sensitive_prefix:
             resolved_prompt = f"{sensitive_prefix}\n\n{resolved_prompt}".strip()
         elif not prompt:
-            resolved_prompt = f"{self.DEFAULT_SENSITIVE_SYSTEM_PROMPT}\n\n{resolved_prompt}".strip()
+            resolved_prompt = (
+                f"{self.DEFAULT_SENSITIVE_SYSTEM_PROMPT}\n\n{resolved_prompt}".strip()
+            )
         max_tokens = int(
             getattr(self.plugin, "image_caption_sensitive_fallback_max_tokens", 300)
             or 300
@@ -571,7 +581,8 @@ class ImageCaptionHandler:
             try:
                 cfg = self.plugin.context.get_config()
                 prompt_template = str(
-                    cfg.get("provider_settings", {}).get("image_caption_prompt", "") or ""
+                    cfg.get("provider_settings", {}).get("image_caption_prompt", "")
+                    or ""
                 ).strip()
             except Exception:
                 prompt_template = ""

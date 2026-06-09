@@ -327,7 +327,10 @@ class ImageGenerationResultHandler:
         if isinstance(image_urls, list) and image_urls:
             for path in image_urls:
                 normalized = str(path or "").strip().lower()
-                if "astrbot_plugin_image_generation" in normalized or "/gen_" in normalized:
+                if (
+                    "astrbot_plugin_image_generation" in normalized
+                    or "/gen_" in normalized
+                ):
                     return True
 
         contexts = getattr(request, "contexts", None)
