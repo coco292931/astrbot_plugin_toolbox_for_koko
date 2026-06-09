@@ -43,7 +43,7 @@
             "weather_summary_prompt": {
                 "description": "多日天气精简指令",
                 "hint": "定义AI应如何总结天气数据。",
-                "type": "string",
+                "type": "text",
                 "default": "请你作为一名资深气象分析师，根据系统提供的多日天气数据，生成一份简短、口语化、亲切友好的天气趋势总结。"
             },
             "weather_summary_llm_provider_id": {
@@ -135,7 +135,7 @@
             "fetch_url_summary_prompt": {
                 "description": "网页正文总结提示词",
                 "hint": "仅在 fetch_url_over_limit_mode=ai_summary 时生效。",
-                "type": "string",
+                "type": "text",
                 "default": "请用目标语言总结下面网页正文，提炼关键信息并保持准确："
             },
             "fetch_url_summary_llm_provider_id": {
@@ -269,7 +269,7 @@
             "keyword_capture_context_prompt": {
                 "description": "上下文注入 prompt 模板",
                 "hint": "可用 {context} 代表群聊上下文, {prompt} 代表用户消息。留空使用内置中文模板。",
-                "type": "string",
+                "type": "text",
                 "default": ""
             },
             "keyword_capture_bypass_probability_on_at": {
@@ -316,7 +316,7 @@
             "content_audit_criteria": {
                 "description": "审核标准",
                 "hint": "定义 AI 回复应遵守的标准。LLM 将据此审核每条回复。",
-                "type": "string",
+                "type": "text",
                 "default": "回复应当友好、有用，不包含敏感内容。"
             },
             "content_audit_keyword_enabled": {
@@ -330,7 +330,7 @@
                 "hint": "针对 AI 回复内容的关键词匹配。命中后直接生成校正指示，不等待轮数触发。例如 [\"我不确定\", \"我不知道\"]。",
                 "type": "list",
                 "items": {
-                    "type": "string"
+                    "type": "text"
                 },
                 "default": []
             },
@@ -385,7 +385,7 @@
             "persona_audit_prompt": {
                 "description": "AI 人格设定",
                 "hint": "定义 AI 应遵守的人格特征描述。LLM 将据此审核回复是否符合人格。",
-                "type": "string",
+                "type": "text",
                 "default": "你是一个可爱、友善的助手，说话语气温柔，使用口语化表达。"
             },
             "persona_audit_inject_mode": {
@@ -417,7 +417,7 @@
             "image_caption_prompt_template": {
                 "description": "图片转述提示词模板",
                 "hint": "可用 {image_type} 代表图片类型（图片/表情包/GIF等）。留空使用默认模板。",
-                "type": "string",
+                "type": "text",
                 "default": ""
             },
             "image_caption_parse_error_keywords": {
@@ -481,7 +481,7 @@
             "image_caption_sensitive_fallback_system_prompt": {
                 "description": "敏感内容兜底系统提示词",
                 "hint": "留空使用插件内置系统提示词；该提示词仅用于敏感内容兜底 Provider，不影响 GIF/普通转述提示词。",
-                "type": "string",
+                "type": "text",
                 "default": ""
             },
             "image_caption_sensitive_fallback_max_tokens": {
@@ -499,7 +499,7 @@
             "image_generation_result_prompt_template": {
                 "description": "生图结果识图提示词模板",
                 "hint": "可用 {task_id}、{image_index}、{image_count} 占位。留空使用内置模板。",
-                "type": "string",
+                "type": "text",
                 "default": ""
             },
             "image_generation_result_max_images": {
