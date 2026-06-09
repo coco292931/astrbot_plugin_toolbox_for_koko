@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.4.2",
+    "1.4.3",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -382,11 +382,17 @@ class ToolboxPlugin(Star):
         )
         if self.persona_audit_inject_mode not in ("prompt", "conversation"):
             self.persona_audit_inject_mode = "conversation"
+        self.use_astrbot_persona = self._safe_bool(
+            self.config.get("use_astrbot_persona", False), False
+        )
+        self.select_persona = str(self.config.get("select_persona", "") or "").strip()
         logger.debug(
             f"[persona_audit] __init__ 配置: "
             f"enabled={self.persona_audit_enabled}, "
             f"rounds={self.persona_audit_rounds}, "
-            f"prompt_len={len(self.persona_audit_prompt)}"
+            f"prompt_len={len(self.persona_audit_prompt)}, "
+            f"use_astrbot_persona={self.use_astrbot_persona}, "
+            f"select_persona={self.select_persona!r}"
         )
 
         if self.content_audit_enabled:

@@ -1,5 +1,24 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.4.3] - 2026-06-10
+
+### ✨ 新增
+
+- **人格遵循审核：新增使用 AstrBot 人格**：
+  - 新增 `use_astrbot_persona`（bool, 默认 false）配置项 — 开启后忽略静态的 `persona_audit_prompt`，改用 AstrBot 人格设定管理器中的选定人格。
+  - 新增 `select_persona`（string, 默认 "", `_special: select_persona`）配置项 — 选择 AstrBot 中特定的人格 ID。留空则读取当前对话绑定的默认人格（`get_default_persona_v3`）。
+  - 新增 `_resolve_persona_prompt(event)` 动态解析方法：
+    - `select_persona` 不为空时 → 调用 `persona_mgr.get_persona(id)` 读取指定人格的 `system_prompt`。
+    - `select_persona` 为空时 → 调用 `persona_mgr.get_default_persona_v3(umo=...)` 读取当前对话默认人格的 `prompt`。
+    - 任何异常/不存在均静默回退到静态的 `_persona_prompt`。
+  - 人格遵循审核触发时优先使用动态解析的人格设定，审核 LLM 据此判断回复是否符合人格特征。
+
+### ⚙ 配置更新
+
+- `persona_audit` 配置组新增：
+  - `use_astrbot_persona`（bool, 默认 false）
+  - `select_persona`（string, 默认 "", `_special: select_persona`）
+
 ## [1.4.0]
 
 ### ✨ 新增

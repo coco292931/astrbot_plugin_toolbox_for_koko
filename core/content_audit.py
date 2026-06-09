@@ -110,6 +110,14 @@ class ContentAuditLoop:
         )
         self._persona_prompt: str = getattr(plugin, "persona_audit_prompt", "") or ""
 
+        # AstrBot 人格联动
+        self._use_astrbot_persona: bool = bool(
+            getattr(plugin, "use_astrbot_persona", False)
+        )
+        self._select_persona: str = (
+            getattr(plugin, "select_persona", "") or ""
+        ).strip()
+
         self._inject_mode_pa: str = (
             getattr(plugin, "persona_audit_inject_mode", "conversation")
             or "conversation"
@@ -608,6 +616,66 @@ class ContentAuditLoop:
 
     # ---- 人格遵循审核入口 ----
 
+    async def _resolve_persona_prompt(
+        self, event: AstrMessageEvent | None = None
+    ) -> str:
+        """解析当前应使用的人格设定文本。
+
+        当 use_astrbot_persona=True 时，优先从 AstrBot PersonaManager 读取：
+          - 若 select_persona 不为空，则使用指定人格 ID 获取对应 system_prompt。
+          - 否则使用 get_default_persona_v3(event.unified_msg_origin) 获取当前对话默认人格。
+        回退到静态 self._persona_prompt。
+        """
+        if not self._use_astrbot_persona:
+            return self._persona_prompt
+
+        try:
+            persona_mgr = self.plugin.context.persona_manager
+            if not persona_mgr:
+                logger.debug(
+                    "[PersonaAudit] use_astrbot_persona=True 但 context.persona_manager 不可用"
+                )
+                return self._persona_prompt
+
+            if self._select_persona:
+                # 使用指定人格 ID
+                persona = await persona_mgr.get_persona(self._select_persona)
+                if persona and hasattr(persona, "system_prompt"):
+                    prompt = persona.system_prompt
+                    logger.info(
+                        f"[PersonaAudit] 从 AstrBot 读取指定人格 "
+                        f"persona_id={self._select_persona}, prompt_len={len(prompt)}"
+                    )
+                    return prompt.strip()
+                else:
+                    logger.warning(
+                        f"[PersonaAudit] 指定人格 ID '{self._select_persona}' 不存在或无效，回退"
+                    )
+                    return self._persona_prompt
+            else:
+                # 使用当前对话默认人格
+                umo = None
+                try:
+                    if event:
+                        umo = event.unified_msg_origin
+                except Exception:
+                    pass
+                personality = await persona_mgr.get_default_persona_v3(umo=umo)
+                if personality and hasattr(personality, "prompt"):
+                    prompt = personality.prompt
+                    logger.info(
+                        f"[PersonaAudit] 从 AstrBot 读取默认人格, prompt_len={len(prompt)}"
+                    )
+                    return prompt.strip()
+                else:
+                    logger.debug(
+                        "[PersonaAudit] get_default_persona_v3 返回空，回退静态人格"
+                    )
+                    return self._persona_prompt
+        except Exception as e:
+            logger.warning(f"[PersonaAudit] 读取 AstrBot 人格失败: {e}，回退静态人格")
+            return self._persona_prompt
+
     async def on_ai_reply_persona(
         self,
         event: AstrMessageEvent,
@@ -621,8 +689,13 @@ class ContentAuditLoop:
         """
         if not self._persona_audit_enabled:
             return
-        if not self._persona_prompt:
+
+        # 动态解析人格设定（支持 AstrBot 人格联动）
+        resolved_prompt = await self._resolve_persona_prompt(event)
+        if not resolved_prompt:
             return
+        # 缓存解析结果，供队列重试使用
+        self._pa_prompt_cache = resolved_prompt
 
         key = await self._make_key(event)
         if not key:
@@ -693,6 +766,7 @@ class ContentAuditLoop:
                 provider=provider,
                 conversation_text=conversation_text,
                 last_correction=last_correction,
+                persona_prompt=resolved_prompt,
             )
         )
         async with self._pa_running_tasks_lock:
@@ -704,12 +778,24 @@ class ContentAuditLoop:
         provider: Any,
         conversation_text: str,
         last_correction: str,
+        persona_prompt: str | None = None,
     ) -> None:
-        """人格审核后台任务：调用审核 LLM 并存储结果。"""
+        """人格审核后台任务：调用审核 LLM 并存储结果。
+
+        Args:
+            session_id: 会话标识 key
+            provider: LLM Provider 实例
+            conversation_text: 待审核的对话文本
+            last_correction: 上次校正方向（供 LLM 参考）
+            persona_prompt: 动态解析后的人格设定文本。为 None 时使用 self._persona_prompt。
+        """
         try:
             logger.info(f"[PersonaAudit] 后台任务: 会话 {session_id} 调用审核 LLM...")
             correction = await self._call_persona_audit_llm(
-                provider, conversation_text, last_correction
+                provider,
+                conversation_text,
+                last_correction,
+                persona_prompt=persona_prompt,
             )
             logger.info(
                 f"[PersonaAudit] 后台任务: 会话 {session_id} 审核 LLM 返回: "
@@ -772,12 +858,17 @@ class ContentAuditLoop:
                             session_id
                         )
 
+                    # 队列重试时使用上一次解析的人格设定（self._pa_prompt_cache）
+                    queue_prompt = getattr(
+                        self, "_pa_prompt_cache", self._persona_prompt
+                    )
                     task = asyncio.create_task(
                         self._run_pa_audit_task(
                             session_id=session_id,
                             provider=provider,
                             conversation_text=new_conversation,
                             last_correction=last_correction,
+                            persona_prompt=queue_prompt,
                         )
                     )
                     async with self._pa_running_tasks_lock:
@@ -800,10 +891,19 @@ class ContentAuditLoop:
         provider: Any,
         conversation_text: str,
         last_correction: str,
+        persona_prompt: str | None = None,
     ) -> str | None:
-        """调用人格审核 LLM，使用独立的人格 prompt 模板。"""
+        """调用人格审核 LLM，使用独立的人格 prompt 模板。
+
+        Args:
+            provider: LLM Provider 实例
+            conversation_text: 待审核的对话文本
+            last_correction: 上次校正方向
+            persona_prompt: 动态人格设定。为 None 时回退到 self._persona_prompt。
+        """
+        effective_prompt = persona_prompt if persona_prompt else self._persona_prompt
         prompt_text = DEFAULT_PERSONA_AUDIT_PROMPT.format(
-            persona_prompt=self._persona_prompt,
+            persona_prompt=effective_prompt,
             last_correction=last_correction or "无",
             conversation=conversation_text,
         )

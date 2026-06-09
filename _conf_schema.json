@@ -394,6 +394,19 @@
                 "type": "string",
                 "default": "conversation",
                 "options": ["prompt", "conversation"]
+            },
+            "use_astrbot_persona": {
+                "description": "使用 AstrBot 人格",
+                "hint": "开启后，忽略上方 AI 人格设定，改用 AstrBot 人格设定管理器中选定的人格设定。插件将在每次审核时从 AstrBot 读取当前对话绑定的 Persona（人格设定）。",
+                "type": "bool",
+                "default": false
+            },
+            "select_persona": {
+                "description": "选择 AstrBot 人格",
+                "hint": "选择 AstrBot 人格设定管理器中特定的人格 ID。留空则读取当前对话绑定的默认人格。若 use_astrbot_persona 关闭则此选项无效。",
+                "type": "string",
+                "default": "",
+                "_special": "select_persona"
             }
         }
     },

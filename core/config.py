@@ -193,6 +193,8 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             "persona_audit_rounds",
             "persona_audit_prompt",
             "persona_audit_inject_mode",
+            "use_astrbot_persona",
+            "select_persona",
         ):
             if key in persona_audit_cfg:
                 incoming[key] = persona_audit_cfg.get(key)
