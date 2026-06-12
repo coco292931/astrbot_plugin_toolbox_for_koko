@@ -557,6 +557,33 @@ class ToolboxPlugin(Star):
         self._cache_expire = 300
         self._cache_lock = asyncio.Lock()
 
+        # Goal 存储：key = unified_msg_origin，value = {"things": str, "location": "system"|"user"}
+        # 持久化到 data_dir/goals.json，重启后保留
+        self._goals_lock = asyncio.Lock()
+        self._goals_file = self.data_dir / "goals.json"
+        self._goals: dict[str, dict] = self._load_goals()
+
+    def _load_goals(self) -> dict[str, dict]:
+        """从磁盘加载 goals.json，返回 dict。"""
+        try:
+            if self._goals_file.exists():
+                raw = json.loads(self._goals_file.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    return raw
+        except Exception as e:
+            logger.warning(f"[goal] 加载 goals.json 失败，使用空字典: {e}")
+        return {}
+
+    def _save_goals(self) -> None:
+        """将当前 _goals 同步写入 goals.json。"""
+        try:
+            self._goals_file.write_text(
+                json.dumps(self._goals, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"[goal] 保存 goals.json 失败: {e}")
+
     def _resolve_data_dir(self) -> Path:
         try:
             return Path(StarTools.get_data_dir("astrbot_plugin_toolbox_for_koko"))
@@ -2334,6 +2361,33 @@ class ToolboxPlugin(Star):
                     await audit_loop.inject_to_request(event, request)
                 except Exception as e:
                     logger.debug(f"[content_audit] 注入校正指示失败: {e}")
+
+            # ---- 注入 Goal ----
+            goal_entry = self._goals.get(event.unified_msg_origin)
+            if goal_entry:
+                things = str(goal_entry.get("things", "") or "").strip()
+                loc = str(goal_entry.get("location", "system") or "system").lower()
+                if things:
+                    goal_block = f"[Goal] {things}"
+                    if loc == "system":
+                        # 追加到系统提示词
+                        if hasattr(request, "system_prompt"):
+                            if request.system_prompt:
+                                request.system_prompt += f"\n{goal_block}"
+                            else:
+                                request.system_prompt = goal_block
+                    else:
+                        # 追加到当前用户消息末尾（不写入 contexts/历史）
+                        if hasattr(request, "prompt") and request.prompt:
+                            request.prompt = request.prompt.rstrip() + f"\n\n{goal_block}"
+                        elif hasattr(request, "extra_user_content_parts"):
+                            from astrbot.core.provider.entites import ProviderRequest  # noqa: F401
+                            try:
+                                from astrbot.core.message.components import Plain
+                                part = Plain(text=f"\n{goal_block}")
+                                request.extra_user_content_parts.append(part)
+                            except Exception:
+                                pass
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
@@ -2447,6 +2501,151 @@ class ToolboxPlugin(Star):
                 MessageChain().message("管理员命令 /tool_memory 已被配置禁用")
             )
             return
+
+    # ---------------- Goal 目标管理 ----------------
+
+    @filter.command("goal")
+    async def goal_command(self, event: AstrMessageEvent):
+        """处理 /goal set [system|user] <内容> 和 /goal clear 命令。
+
+        用法：
+          /goal set <内容>              设置 goal，默认注入位置 system（系统提示词）
+          /goal set system <内容>       设置 goal，注入到系统提示词
+          /goal set user <内容>         设置 goal，注入到每条用户消息末尾（不落盘）
+          /goal clear                   清除当前会话的 goal
+        """
+        raw = (event.get_message_outline() or "").strip()
+        # 去掉命令前缀，取剩余参数部分
+        # raw 可能是 "goal set system xxx" 或 "goal clear" 等
+        parts = raw.split(None, 1)  # ["goal", "set system xxx"] 或 ["goal", "clear"]
+        sub_raw = parts[1].strip() if len(parts) > 1 else ""
+
+        umo = event.unified_msg_origin
+
+        if not sub_raw or sub_raw.lower() == "clear":
+            # /goal clear
+            removed = umo in self._goals
+            self._goals.pop(umo, None)
+            async with self._goals_lock:
+                self._save_goals()
+            if removed:
+                await event.send(MessageChain().message("✅ Goal 已清除。"))
+            else:
+                await event.send(MessageChain().message("当前会话没有设置 Goal。"))
+            event.stop_event()
+            return
+
+        # /goal set [location] <things>
+        if sub_raw.lower().startswith("set"):
+            after_set = sub_raw[3:].strip()  # 去掉 "set"
+            location, things = self._parse_goal_args(after_set)
+            if not things:
+                await event.send(
+                    MessageChain().message(
+                        "用法：/goal set [system|user] <目标内容>\n"
+                        "  system（默认）：注入到系统提示词\n"
+                        "  user：注入到每条用户消息末尾（不落盘到历史）"
+                    )
+                )
+                event.stop_event()
+                return
+            self._goals[umo] = {"things": things, "location": location}
+            async with self._goals_lock:
+                self._save_goals()
+            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
+            await event.send(
+                MessageChain().message(
+                    f"✅ Goal 已设置（注入位置：{loc_label}）：\n{things}"
+                )
+            )
+            event.stop_event()
+            return
+
+        # 兜底：把整个 sub_raw 当作 things（不带 set 前缀时）
+        location, things = self._parse_goal_args(sub_raw)
+        if things:
+            self._goals[umo] = {"things": things, "location": location}
+            async with self._goals_lock:
+                self._save_goals()
+            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
+            await event.send(
+                MessageChain().message(
+                    f"✅ Goal 已设置（注入位置：{loc_label}）：\n{things}"
+                )
+            )
+        else:
+            await event.send(
+                MessageChain().message(
+                    "用法：\n"
+                    "  /goal set [system|user] <目标内容>\n"
+                    "  /goal clear"
+                )
+            )
+        event.stop_event()
+
+    def _parse_goal_args(self, text: str) -> tuple[str, str]:
+        """从文本中解析 location 和 things。
+
+        格式：[system|user] <things>
+        location 默认为 system。
+        """
+        text = text.strip()
+        parts = text.split(None, 1)
+        if parts and parts[0].lower() in ("system", "user"):
+            location = parts[0].lower()
+            things = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            location = "system"
+            things = text
+        return location, things
+
+    @filter.llm_tool(name="set_goal")
+    async def set_goal(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        things: str = "",
+        location: str = "system",
+    ) -> dict:
+        """设置或清除当前会话的 Goal（目标指引）。Goal 会在每次 LLM 请求时自动注入，引导对话方向。
+
+        Args:
+            action(string): 操作类型：set（设置）或 clear（清除），必填
+            things(string): Goal 内容，action=set 时必填；例如"今天专注讨论旅行计划"
+            location(string): 注入位置：system（默认，追加到系统提示词）或 user（追加到每条用户消息末尾，不落盘到历史）
+        """
+        action = (action or "").strip().lower()
+        umo = event.unified_msg_origin
+
+        if action == "clear":
+            removed = umo in self._goals
+            self._goals.pop(umo, None)
+            async with self._goals_lock:
+                self._save_goals()
+            if removed:
+                return {"status": "success", "message": "Goal 已清除。"}
+            return {"status": "success", "message": "当前会话没有设置 Goal。"}
+
+        if action == "set":
+            things = (things or "").strip()
+            if not things:
+                return {"status": "error", "message": "action=set 时 things 不能为空。"}
+            location = (location or "system").strip().lower()
+            if location not in ("system", "user"):
+                location = "system"
+            self._goals[umo] = {"things": things, "location": location}
+            async with self._goals_lock:
+                self._save_goals()
+            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
+            return {
+                "status": "success",
+                "message": f"Goal 已设置（注入位置：{loc_label}）：{things}",
+            }
+
+        return {
+            "status": "error",
+            "message": "action 仅支持 set 或 clear。",
+        }
 
     # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
     @filter.llm_tool(name="search_memory_vector")

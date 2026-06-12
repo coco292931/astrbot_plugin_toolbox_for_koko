@@ -19,6 +19,7 @@
   - 新增 `/tool_memory` 管理命令，便于管理员操作内存。
   - 自动将用户内存注入到 LLM 上下文中，提升对话的智能性。
 - 📤 **主动消息发送**：支持向指定 QQ 好友或群聊发送文本消息。
+- 🎯 **Goal 目标指引**：会话级目标设置，用户与 LLM 均可通过 `/goal` 命令或 `set_goal` 工具设置/清除当前对话的 Goal，自动注入到每次 LLM 请求中引导对话方向。持久化保存，重启后自动恢复。
 
 ## 🏗️ 项目架构
 
@@ -125,6 +126,18 @@ astrbot_plugin_toolbox_for_koko/
 - **image_generation_result_hook_enabled**: 启用生图结果自动识图。开启后，当 `astrbot_plugin_image_generation` 完成任务并唤醒 AI 交付结果时，toolbox 会先识别生成图再注入摘要。
 - **image_generation_result_prompt_template**: 生图结果识图提示词模板，可用 `{task_id}`、`{image_index}`、`{image_count}` 占位。留空使用默认模板。
 - **image_generation_result_max_images**: 单次任务最多识别多少张生成图，默认 `1`。
+
+### 🎯 Goal 目标指引
+
+会话级目标指引，支持用户与 LLM 双侧设置，在每次 LLM 请求时自动注入，引导对话方向。Goal 持久化保存，重启后自动恢复。
+
+**用户命令：**
+- `/goal set <内容>` — 设置 Goal，默认注入到系统提示词
+- `/goal set system <内容>` — 注入到系统提示词（全局生效）
+- `/goal set user <内容>` — 注入到每条用户消息末尾（不落盘到历史对话）
+- `/goal clear` — 清除当前会话的 Goal
+
+**LLM 工具 `set_goal`：** LLM 可在对话中自主调用，参数为 `action`（`set`/`clear`）、`things`（内容）、`location`（`system`/`user`）。
 
 ### 📋 自动内容审核校正 (content_audit)
 

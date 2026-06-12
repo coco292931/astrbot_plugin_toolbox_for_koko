@@ -1,5 +1,17 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.5.0] - 2026-06-12
+
+### ✨ 新增
+
+- **Goal 目标指引（`main.py`）**：新增会话级 Goal 管理功能，支持用户与 LLM 双侧设置/清除当前对话的目标指引，在每次 LLM 请求时自动注入，引导对话方向。
+  - **用户命令**：
+    - `/goal set [system|user] <内容>` — 设置 Goal；`system`（默认）追加到系统提示词，`user` 追加到每条用户消息末尾（不落盘到历史对话）。
+    - `/goal clear` — 清除当前会话的 Goal。
+  - **LLM 工具 `set_goal`**：LLM 可直接调用，参数为 `action`（`set`/`clear`）、`things`（内容）、`location`（`system`/`user`）。
+  - **注入策略**：`location=system` 时追加到 `request.system_prompt`；`location=user` 时追加到当前用户消息末尾，不写入 `contexts`，不影响历史对话。
+  - **持久化**：Goal 以 JSON 格式存储在 `data_dir/goals.json`，重启插件后自动恢复，各会话独立。
+
 ## [1.4.3] - 2026-06-10
 
 ### ✨ 新增
