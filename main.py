@@ -46,6 +46,7 @@ from .tools.local_memory import (
     run_get_memory_detail,
 )
 from .tools.send_msg import run_send_message
+from .tools.calendar import run_get_calendar
 
 
 def _load_schema_defaults() -> dict:
@@ -491,6 +492,14 @@ class ToolboxPlugin(Star):
         self.fetch_url_max_redirects = self._safe_int(
             self.config.get("fetch_url_max_redirects", 4), 4, 0, 10
         )
+
+        # Calendar 配置
+        self.calendar_ical_url = str(
+            self.config.get("calendar_ical_url", "") or ""
+        ).strip()
+        self.calendar_proxy = str(
+            self.config.get("calendar_proxy", "") or ""
+        ).strip()
 
         # 构建工具注册表（用于 call-search-run 三段式调用）
         self._tool_registry = self._build_tool_registry()
@@ -1461,6 +1470,86 @@ class ToolboxPlugin(Star):
             "handler": self._run_tool_send_message,
         }
 
+        # ---- Goal 管理（也走 registry，支持 run_koko_tool 调用） ----
+        registry["set_goal"] = {
+            "name": "set_goal",
+            "description": "设置或清除当前会话的 Goal（目标指引）。Goal 会在每次 LLM 请求时自动注入，引导对话方向。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作类型：set（设置）或 clear（清除），必填",
+                    },
+                    "things": {
+                        "type": "string",
+                        "description": "Goal 内容，action=set 时必填",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "注入位置：system（默认）或 user",
+                    },
+                },
+                "required": ["action"],
+            },
+            "keywords": ["goal", "目标", "设置目标", "清除目标"],
+            "handler": self._run_tool_set_goal,
+        }
+
+        registry["get_goal"] = {
+            "name": "get_goal",
+            "description": "获取当前会话已设置的 Goal（目标指引），包含内容、注入位置、设定时间和设定者。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+            "keywords": ["goal", "目标", "查看目标", "获取目标"],
+            "handler": self._run_tool_get_goal,
+        }
+
+        # ---- 日历查询（走 registry + @filter.llm_tool 双渠道） ----
+        registry["tool_get_calendar"] = {
+            "name": "tool_get_calendar",
+            "description": "获取 iCal 日历中指定时间范围内的事件列表。支持 Google Calendar 等标准 iCal 地址。支持绝对日期范围（date_from/date_to）和相对天数（days_ahead/days_back）两种模式。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ical_url": {
+                        "type": "string",
+                        "description": "iCal URL，可选（覆盖配置中的 calendar_ical_url）",
+                    },
+                    "proxy": {
+                        "type": "string",
+                        "description": "HTTP 代理地址，可选（如 http://127.0.0.1:7890）",
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "起始日期，YYYY-MM-DD 格式，可选。传入后优先于 days_back。",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "结束日期，YYYY-MM-DD 格式，可选。传入后优先于 days_ahead。",
+                    },
+                    "days_ahead": {
+                        "type": "integer",
+                        "description": "查询未来多少天，默认 7，最大 365（date_from/date_to 未传入时生效）",
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "查询过去多少天，默认 0（date_from/date_to 未传入时生效）",
+                    },
+                    "max_events": {
+                        "type": "integer",
+                        "description": "最多返回事件数，默认 20，最大 100",
+                    },
+                    "tz_offset": {
+                        "type": "integer",
+                        "description": "本地时区偏移（小时），默认自动读取 AstrBot 系统时区",
+                    },
+                },
+                "required": [],
+            },
+            "keywords": ["日历", "calendar", "日程", "事件", "ical", "schedule"],
+            "handler": self._run_tool_calendar,
+        }
+
         return registry
 
     def _get_available_tools(self) -> dict:
@@ -1469,6 +1558,8 @@ class ToolboxPlugin(Star):
 
     def _get_wyc_plugin_instance(self):
         candidate_names = [
+            "wyc_tools",
+            "wyc_plugin_qzone_tools",
             "astrbot_plugin_qzone_tools",
             "更多koko工具",
             "Qzone核心工具",
@@ -1910,6 +2001,30 @@ class ToolboxPlugin(Star):
 
     async def _run_tool_send_message(self, event: AstrMessageEvent, args: dict) -> str:
         return await run_send_message(self, event, args)
+
+    async def _run_tool_calendar(self, event: AstrMessageEvent, args: dict) -> str:
+        return await run_get_calendar(self, args)
+
+    async def _run_tool_set_goal(self, event: AstrMessageEvent, args: dict) -> str:
+        result = await self.set_goal(
+            event,
+            action=str(args.get("action", "") or ""),
+            things=str(args.get("things", "") or ""),
+            location=str(args.get("location", "system") or "system"),
+        )
+        return result.get("message", str(result))
+
+    async def _run_tool_get_goal(self, event: AstrMessageEvent, args: dict) -> str:
+        result = await self.get_goal(event)
+        if not result.get("has_goal"):
+            return result.get("message", "当前会话没有设置 Goal。")
+        lines = [
+            f"Goal: {result.get('things', '')}",
+            f"注入位置: {result.get('location', '')}",
+            f"设定时间: {result.get('set_at', '')}",
+            f"设定者: {result.get('set_by', '')}",
+        ]
+        return "\n".join(lines)
 
     async def _get_client(self, event: AstrMessageEvent) -> Any:
         if hasattr(event, "bot") and getattr(event.bot, "api", None):
@@ -2668,6 +2783,56 @@ class ToolboxPlugin(Star):
 
         此工具不修改任何状态，仅返回当前 Goal 信息。
         """
+        umo = event.unified_msg_origin
+        entry = self._goals.get(umo)
+        if not entry:
+            return {"status": "success", "has_goal": False, "message": "当前会话没有设置 Goal。"}
+        return {
+            "status": "success",
+            "has_goal": True,
+            "things": entry.get("things", ""),
+            "location": entry.get("location", "system"),
+            "set_at": entry.get("set_at", ""),
+            "set_by": entry.get("set_by", ""),
+        }
+
+    @filter.llm_tool(name="tool_get_calendar")
+    async def tool_get_calendar(
+        self,
+        event: AstrMessageEvent,
+        ical_url: str = "",
+        proxy: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        days_ahead: int = 7,
+        days_back: int = 0,
+        max_events: int = 20,
+        tz_offset: int = None,
+    ) -> dict:
+        """获取 iCal 日历中指定时间范围内的事件列表。支持 Google Calendar 等标准 iCal 地址。
+
+        Args:
+            ical_url(string): iCal URL，可选（覆盖配置中的 calendar_ical_url）
+            proxy(string): HTTP 代理地址，可选（如 http://127.0.0.1:7890）
+            date_from(string): 起始日期，YYYY-MM-DD 格式，可选。传入后优先于 days_back。
+            date_to(string): 结束日期，YYYY-MM-DD 格式，可选。传入后优先于 days_ahead。
+            days_ahead(integer): 查询未来多少天，默认 7（date_from/date_to 未传入时生效）
+            days_back(integer): 查询过去多少天，默认 0（date_from/date_to 未传入时生效）
+            max_events(integer): 最多返回事件数，默认 20
+            tz_offset(integer): 本地时区偏移（小时），不传则自动读取 AstrBot 系统时区
+        """
+        args = {
+            "ical_url": ical_url,
+            "proxy": proxy,
+            "date_from": date_from,
+            "date_to": date_to,
+            "days_ahead": days_ahead,
+            "days_back": days_back,
+            "max_events": max_events,
+            "tz_offset": tz_offset,
+        }
+        message = await run_get_calendar(self, args)
+        return {"status": "success", "message": message}
         umo = event.unified_msg_origin
         entry = self._goals.get(umo)
         if not entry:

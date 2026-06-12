@@ -598,5 +598,24 @@
                 }
             }
         }
+    },
+    "calendar": {
+        "description": "日历配置",
+        "type": "object",
+        "hint": "配置 iCal 日历查询工具相关选项。",
+        "items": {
+            "calendar_ical_url": {
+                "description": "iCal URL",
+                "hint": "Google Calendar 或其他标准 iCal 地址，例如 https://calendar.google.com/calendar/ical/xxx/basic.ics。",
+                "type": "string",
+                "default": ""
+            },
+            "calendar_proxy": {
+                "description": "代理地址（可选）",
+                "hint": "拉取 iCal 时使用的 HTTP 代理，例如 http://127.0.0.1:7890。留空不使用代理。",
+                "type": "string",
+                "default": ""
+            }
+        }
     }
 }

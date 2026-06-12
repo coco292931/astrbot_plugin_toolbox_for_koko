@@ -199,6 +199,15 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             if key in persona_audit_cfg:
                 incoming[key] = persona_audit_cfg.get(key)
 
+    calendar_cfg = raw.get("calendar", {})
+    if isinstance(calendar_cfg, dict):
+        for key in (
+            "calendar_ical_url",
+            "calendar_proxy",
+        ):
+            if key in calendar_cfg:
+                incoming[key] = calendar_cfg.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 

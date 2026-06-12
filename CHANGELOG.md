@@ -1,6 +1,27 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
-## [1.5.0] - 2026-06-12
+## [1.6.0] - 2026-06-13
+
+### ✨ 新增
+
+- **iCal 日历查询（`tools/calendar.py`）**：新增 `tool_get_calendar` 工具，通过标准 iCal URL（如 Google Calendar）拉取并解析日历事件，返回指定时间范围内的事件列表。
+  - 零外部依赖，内置 RFC 5545 折叠行展开 + 日期时区解析，不需要安装 `icalendar` 库。
+  - 支持通过工具参数或配置项（`calendar.calendar_ical_url`、`calendar.calendar_proxy`）传入 iCal 地址和 HTTP 代理。
+  - **日期范围参数**：支持绝对日期模式（`date_from`/`date_to`，格式 `YYYY-MM-DD`）和相对天数模式（`days_ahead`/`days_back`）；绝对日期优先。
+  - **自动读取 AstrBot 系统时区**：`tz_offset` 未传入时，自动从 AstrBot 系统配置的 `timezone`（IANA 名称，如 `Asia/Shanghai`）换算偏移小时数（正确处理夏令时），读取失败则回退 UTC+8。
+  - 双渠道暴露：`@filter.llm_tool` 直接暴露 + 注册进 `_tool_registry`，支持 `run_koko_tool` 调用。
+  - 新增配置组 `calendar`：`calendar_ical_url`（iCal 地址）、`calendar_proxy`（代理地址）。
+
+### 🔧 变更
+
+- **`tool_get_calendar` dead code 清理**：修复了上一版本中 `return` 之后残留的冗余代码。
+
+## [1.5.1] - 2026-06-13
+
+### 🔧 变更
+
+- **`get_goal` LLM 工具新增元数据字段**：`set_at`（设定时间）、`set_by`（设定者：`user`/`llm`）随 Goal 一起持久化，`get_goal` 工具返回完整记录。
+- **Goal/Calendar registry 双渠道接入**：`set_goal`、`get_goal`、`tool_get_calendar` 均注册进 `_tool_registry`，`run_koko_tool` 现在也可以调用这三个工具。
 
 ### ✨ 新增
 

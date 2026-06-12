@@ -20,6 +20,7 @@
   - 自动将用户内存注入到 LLM 上下文中，提升对话的智能性。
 - 📤 **主动消息发送**：支持向指定 QQ 好友或群聊发送文本消息。
 - 🎯 **Goal 目标指引**：会话级目标设置，用户与 LLM 均可通过 `/goal` 命令或 `set_goal` 工具设置/清除当前对话的 Goal，自动注入到每次 LLM 请求中引导对话方向。持久化保存，重启后自动恢复。
+- 📅 **iCal 日历查询**：通过 `tool_get_calendar` 工具拉取 Google Calendar 等标准 iCal 日历，返回指定时间范围内的事件列表。支持代理、自定义时区（自动读取 AstrBot 系统时区），零外部依赖。
 
 ## 🏗️ 项目架构
 
@@ -138,8 +139,21 @@ astrbot_plugin_toolbox_for_koko/
 - `/goal clear` — 清除当前会话的 Goal
 
 **LLM 工具 `set_goal`：** LLM 可在对话中自主调用，参数为 `action`（`set`/`clear`）、`things`（内容）、`location`（`system`/`user`）。
+**LLM 工具 `get_goal`：** 只读工具，返回当前会话已设置的 Goal 内容、注入位置、设定时间和设定者。
 
-### 📋 自动内容审核校正 (content_audit)
+**用户命令 `/goal` 也可直接查看当前 Goal：** 不带子命令时返回当前会话的 Goal 状态。
+### � iCal 日历查询 (calendar)
+
+通过标准 iCal URL 拉取日历数据，返回指定时间范围内的事件列表。零外部依赖，内置 iCal 解析器。
+
+- **calendar_ical_url**: iCal 订阅地址，例如 Google Calendar 的 `.ics` 私有链接。
+- **calendar_proxy**: 拉取 iCal 时使用的 HTTP 代理（如 `http://127.0.0.1:7890`），留空不使用。
+
+**LLM 工具 `tool_get_calendar`：** 支持参数 `ical_url`（覆盖配置）、`proxy`（覆盖配置）、`date_from`（起始日期 YYYY-MM-DD）、`date_to`（结束日期 YYYY-MM-DD）、`days_ahead`（未来天数，默认 7）、`days_back`（过去天数，默认 0）、`max_events`（最多返回条数，默认 20）、`tz_offset`（时区偏移小时数，不传时自动读取 AstrBot 系统时区配置，失败则回退 UTC+8）。
+
+> `date_from`/`date_to` 优先于 `days_ahead`/`days_back`；不传绝对日期时以相对天数计算范围。
+
+### �📋 自动内容审核校正 (content_audit)
 
 自动审核 AI 回复质量，支持轮数触发和关键词触发两种方式。审核结果会在下一条用户消息时以 `<system_WARNING>` 标签注入，引导 LLM 调整回复风格。
 > 本功能与1.3.2更新为异步处理，审核llm回复后才插入用户消息当中，避免阻塞。
