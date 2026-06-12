@@ -233,7 +233,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.4.3",
+    "1.5.1",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2549,7 +2549,12 @@ class ToolboxPlugin(Star):
                 )
                 event.stop_event()
                 return
-            self._goals[umo] = {"things": things, "location": location}
+            self._goals[umo] = {
+                "things": things,
+                "location": location,
+                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "set_by": "user",
+            }
             async with self._goals_lock:
                 self._save_goals()
             loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
@@ -2564,7 +2569,12 @@ class ToolboxPlugin(Star):
         # 兜底：把整个 sub_raw 当作 things（不带 set 前缀时）
         location, things = self._parse_goal_args(sub_raw)
         if things:
-            self._goals[umo] = {"things": things, "location": location}
+            self._goals[umo] = {
+                "things": things,
+                "location": location,
+                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "set_by": "user",
+            }
             async with self._goals_lock:
                 self._save_goals()
             loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
@@ -2633,7 +2643,12 @@ class ToolboxPlugin(Star):
             location = (location or "system").strip().lower()
             if location not in ("system", "user"):
                 location = "system"
-            self._goals[umo] = {"things": things, "location": location}
+            self._goals[umo] = {
+                "things": things,
+                "location": location,
+                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "set_by": "llm",
+            }
             async with self._goals_lock:
                 self._save_goals()
             loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
@@ -2645,6 +2660,25 @@ class ToolboxPlugin(Star):
         return {
             "status": "error",
             "message": "action 仅支持 set 或 clear。",
+        }
+
+    @filter.llm_tool(name="get_goal")
+    async def get_goal(self, event: AstrMessageEvent) -> dict:
+        """获取当前会话已设置的 Goal（目标指引），包含内容、注入位置、设定时间和设定者。
+
+        此工具不修改任何状态，仅返回当前 Goal 信息。
+        """
+        umo = event.unified_msg_origin
+        entry = self._goals.get(umo)
+        if not entry:
+            return {"status": "success", "has_goal": False, "message": "当前会话没有设置 Goal。"}
+        return {
+            "status": "success",
+            "has_goal": True,
+            "things": entry.get("things", ""),
+            "location": entry.get("location", "system"),
+            "set_at": entry.get("set_at", ""),
+            "set_by": entry.get("set_by", ""),
         }
 
     # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
