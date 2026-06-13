@@ -187,8 +187,8 @@ async def run_get_calendar(plugin: Any, args: dict) -> str:
         max_events = 20
 
     raw_tz = args.get("tz_offset", None)
-    if raw_tz is None:
-        # 未传入时自动从 AstrBot 系统配置读取 timezone
+    # None 或 -999（哨兵值）均表示未传入，自动从 AstrBot 系统配置读取
+    if raw_tz is None or raw_tz == -999:
         tz_offset = _get_astrbot_tz_offset(plugin)
     else:
         try:

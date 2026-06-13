@@ -82,7 +82,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.1",
+    "1.6.2",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2664,10 +2664,10 @@ class ToolboxPlugin(Star):
             proxy(string): HTTP 代理地址，可选（如 http://127.0.0.1:7890）
             date_from(string): 起始日期，YYYY-MM-DD 格式，可选。传入后优先于 days_back。
             date_to(string): 结束日期，YYYY-MM-DD 格式，可选。传入后优先于 days_ahead。
-            days_ahead(integer): 查询未来多少天，默认 7（date_from/date_to 未传入时生效）
-            days_back(integer): 查询过去多少天，默认 0（date_from/date_to 未传入时生效）
-            max_events(integer): 最多返回事件数，默认 20
-            tz_offset(integer): 本地时区偏移（小时），不传则自动读取 AstrBot 系统时区
+            days_ahead(int): 查询未来多少天，默认 7（date_from/date_to 未传入时生效）
+            days_back(int): 查询过去多少天，默认 0（date_from/date_to 未传入时生效）
+            max_events(int): 最多返回事件数，默认 20
+            tz_offset(int): 本地时区偏移（小时），不传则自动读取 AstrBot 系统时区
         """
         args = {
             "ical_url": ical_url,
@@ -2677,8 +2677,8 @@ class ToolboxPlugin(Star):
             "days_ahead": days_ahead,
             "days_back": days_back,
             "max_events": max_events,
-            # -999 为哨兵值，表示用户未传入，交由 calendar.py 自动读取系统时区
-            "tz_offset": None if tz_offset == -999 else tz_offset,
+            # -999 为哨兵值，表示用户未传入，calendar.py 会自动读取系统时区
+            "tz_offset": tz_offset,
         }
         message = await run_get_calendar(self, args)
         return {"status": "success", "message": message}
