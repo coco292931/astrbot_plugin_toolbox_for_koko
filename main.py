@@ -82,7 +82,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.2",
+    "1.6.3",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -1320,14 +1320,14 @@ class ToolboxPlugin(Star):
 
         # ---- Goal 管理（也走 registry，支持 run_koko_tool 调用） ----
         registry["set_goal"] = {
-            "name": "set_goal",
-            "description": "设置或清除当前会话的 Goal（目标指引）。Goal 会在每次 LLM 请求时自动注入，引导对话方向。",
+            "name": "goal",
+            "description": "管理当前会话的 Goal（目标指引）。支持 get/set/clear。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "操作类型：set（设置）或 clear（清除），必填",
+                        "description": "操作类型：get（查看）、set（设置）、clear（清除），默认 get",
                     },
                     "things": {
                         "type": "string",
@@ -1335,19 +1335,28 @@ class ToolboxPlugin(Star):
                     },
                     "location": {
                         "type": "string",
-                        "description": "注入位置：system（默认）或 user",
+                        "description": "注入位置：system（默认）或 user，action=set 时生效",
                     },
                 },
-                "required": ["action"],
+                "required": [],
             },
-            "keywords": ["goal", "目标", "设置目标", "清除目标"],
+            "keywords": ["goal", "目标", "设置目标", "清除目标", "查看目标"],
             "handler": self._run_tool_set_goal,
         }
 
         registry["get_goal"] = {
-            "name": "get_goal",
-            "description": "获取当前会话已设置的 Goal（目标指引），包含内容、注入位置、设定时间和设定者。",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "name": "goal",
+            "description": "查看当前会话已设置的 Goal。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "\"get\"",
+                    }
+                },
+                "required": [],
+            },
             "keywords": ["goal", "目标", "查看目标", "获取目标"],
             "handler": self._run_tool_get_goal,
         }
@@ -1854,16 +1863,16 @@ class ToolboxPlugin(Star):
         return await run_get_calendar(self, args)
 
     async def _run_tool_set_goal(self, event: AstrMessageEvent, args: dict) -> str:
-        result = await self.set_goal(
+        result = await self.goal(
             event,
-            action=str(args.get("action", "") or ""),
+            action=str(args.get("action", "get") or "get"),
             things=str(args.get("things", "") or ""),
             location=str(args.get("location", "system") or "system"),
         )
         return result.get("message", str(result))
 
     async def _run_tool_get_goal(self, event: AstrMessageEvent, args: dict) -> str:
-        result = await self.get_goal(event)
+        result = await self.goal(event, action="get")
         if not result.get("has_goal"):
             return result.get("message", "当前会话没有设置 Goal。")
         lines = [
@@ -2469,24 +2478,44 @@ class ToolboxPlugin(Star):
 
     @filter.command("goal")
     async def goal_command(self, event: AstrMessageEvent):
-        """处理 /goal set [system|user] <内容> 和 /goal clear 命令。
+        """Goal 目标管理命令。
 
         用法：
+          /goal                         查看当前会话的 goal
+          /goal get                     查看当前会话的 goal
           /goal set <内容>              设置 goal，默认注入位置 system（系统提示词）
           /goal set system <内容>       设置 goal，注入到系统提示词
           /goal set user <内容>         设置 goal，注入到每条用户消息末尾（不落盘）
           /goal clear                   清除当前会话的 goal
         """
         raw = (event.get_message_outline() or "").strip()
-        # 去掉命令前缀，取剩余参数部分
-        # raw 可能是 "goal set system xxx" 或 "goal clear" 等
-        parts = raw.split(None, 1)  # ["goal", "set system xxx"] 或 ["goal", "clear"]
+        parts = raw.split(None, 1)
         sub_raw = parts[1].strip() if len(parts) > 1 else ""
+        sub_lower = sub_raw.lower()
 
         umo = event.unified_msg_origin
 
-        if not sub_raw or sub_raw.lower() == "clear":
-            # /goal clear
+        # 无参数或 get → 查看
+        if not sub_raw or sub_lower == "get":
+            entry = self._goals.get(umo)
+            if not entry:
+                await event.send(MessageChain().message("当前会话没有设置 Goal。"))
+            else:
+                loc_label = "系统提示词" if entry.get("location", "system") == "system" else "用户消息末尾（不落盘）"
+                set_by = entry.get("set_by", "")
+                set_at = entry.get("set_at", "")
+                await event.send(
+                    MessageChain().message(
+                        f"🎯 当前 Goal（注入位置：{loc_label}）：\n"
+                        f"{entry.get('things', '')}\n"
+                        f"设定时间：{set_at}  设定者：{set_by}"
+                    )
+                )
+            event.stop_event()
+            return
+
+        # clear
+        if sub_lower == "clear":
             removed = umo in self._goals
             self._goals.pop(umo, None)
             async with self._goals_lock:
@@ -2498,9 +2527,9 @@ class ToolboxPlugin(Star):
             event.stop_event()
             return
 
-        # /goal set [location] <things>
-        if sub_raw.lower().startswith("set"):
-            after_set = sub_raw[3:].strip()  # 去掉 "set"
+        # set [location] <things>
+        if sub_lower.startswith("set"):
+            after_set = sub_raw[3:].strip()
             location, things = self._parse_goal_args(after_set)
             if not things:
                 await event.send(
@@ -2529,31 +2558,16 @@ class ToolboxPlugin(Star):
             event.stop_event()
             return
 
-        # 兜底：把整个 sub_raw 当作 things（不带 set 前缀时）
-        location, things = self._parse_goal_args(sub_raw)
-        if things:
-            self._goals[umo] = {
-                "things": things,
-                "location": location,
-                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "set_by": "user",
-            }
-            async with self._goals_lock:
-                self._save_goals()
-            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
-            await event.send(
-                MessageChain().message(
-                    f"✅ Goal 已设置（注入位置：{loc_label}）：\n{things}"
-                )
+        # 未识别的子命令 → 显示帮助
+        await event.send(
+            MessageChain().message(
+                "用法：\n"
+                "  /goal          查看当前 Goal\n"
+                "  /goal get      查看当前 Goal\n"
+                "  /goal set [system|user] <目标内容>\n"
+                "  /goal clear    清除 Goal"
             )
-        else:
-            await event.send(
-                MessageChain().message(
-                    "用法：\n"
-                    "  /goal set [system|user] <目标内容>\n"
-                    "  /goal clear"
-                )
-            )
+        )
         event.stop_event()
 
     def _parse_goal_args(self, text: str) -> tuple[str, str]:
@@ -2572,66 +2586,8 @@ class ToolboxPlugin(Star):
             things = text
         return location, things
 
-    @filter.llm_tool(name="set_goal")
-    async def set_goal(
-        self,
-        event: AstrMessageEvent,
-        action: str,
-        things: str = "",
-        location: str = "system",
-    ) -> dict:
-        """设置或清除当前会话的 Goal（目标指引）。Goal 会在每次 LLM 请求时自动注入，引导对话方向。
-
-        Args:
-            action(string): 操作类型：set（设置）或 clear（清除），必填
-            things(string): Goal 内容，action=set 时必填；例如"今天专注讨论旅行计划"
-            location(string): 注入位置：system（默认，追加到系统提示词）或 user（追加到每条用户消息末尾，不落盘到历史）
-        """
-        action = (action or "").strip().lower()
-        umo = event.unified_msg_origin
-
-        if action == "clear":
-            removed = umo in self._goals
-            self._goals.pop(umo, None)
-            async with self._goals_lock:
-                self._save_goals()
-            if removed:
-                return {"status": "success", "message": "Goal 已清除。"}
-            return {"status": "success", "message": "当前会话没有设置 Goal。"}
-
-        if action == "set":
-            things = (things or "").strip()
-            if not things:
-                return {"status": "error", "message": "action=set 时 things 不能为空。"}
-            location = (location or "system").strip().lower()
-            if location not in ("system", "user"):
-                location = "system"
-            self._goals[umo] = {
-                "things": things,
-                "location": location,
-                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "set_by": "llm",
-            }
-            async with self._goals_lock:
-                self._save_goals()
-            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
-            return {
-                "status": "success",
-                "message": f"Goal 已设置（注入位置：{loc_label}）：{things}",
-            }
-
-        return {
-            "status": "error",
-            "message": "action 仅支持 set 或 clear。",
-        }
-
-    @filter.llm_tool(name="get_goal")
-    async def get_goal(self, event: AstrMessageEvent) -> dict:
-        """获取当前会话已设置的 Goal（目标指引），包含内容、注入位置、设定时间和设定者。
-
-        此工具不修改任何状态，仅返回当前 Goal 信息。
-        """
-        umo = event.unified_msg_origin
+    def _goal_get_response(self, umo: str) -> dict:
+        """读取并返回当前 Goal 信息的公共逻辑。"""
         entry = self._goals.get(umo)
         if not entry:
             return {"status": "success", "has_goal": False, "message": "当前会话没有设置 Goal。"}
@@ -2643,6 +2599,59 @@ class ToolboxPlugin(Star):
             "set_at": entry.get("set_at", ""),
             "set_by": entry.get("set_by", ""),
         }
+
+    @filter.llm_tool(name="goal")
+    async def goal(
+        self,
+        event: AstrMessageEvent,
+        action: str = "get",
+        things: str = "",
+        location: str = "system",
+    ) -> dict:
+        """管理当前会话的 Goal（目标指引）。Goal 会在每次 LLM 请求时自动注入，引导对话方向。
+
+        Args:
+            action(string): 操作类型：get（查看，默认）、set（设置）、clear（清除）
+            things(string): Goal 内容，action=set 时必填；例如"今天专注讨论旅行计划"
+            location(string): 注入位置：system（默认，追加到系统提示词）或 user（追加到每条用户消息末尾，不落盘到历史）
+        """
+        act = (action or "get").strip().lower()
+        umo = event.unified_msg_origin
+
+        if act == "get" or not act:
+            return self._goal_get_response(umo)
+
+        if act == "clear":
+            removed = umo in self._goals
+            self._goals.pop(umo, None)
+            async with self._goals_lock:
+                self._save_goals()
+            if removed:
+                return {"status": "success", "message": "Goal 已清除。"}
+            return {"status": "success", "message": "当前会话没有设置 Goal。"}
+
+        if act == "set":
+            things = (things or "").strip()
+            if not things:
+                return {"status": "error", "message": "action=set 时 things 不能为空。"}
+            loc = (location or "system").strip().lower()
+            if loc not in ("system", "user"):
+                loc = "system"
+            self._goals[umo] = {
+                "things": things,
+                "location": loc,
+                "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "set_by": "llm",
+            }
+            async with self._goals_lock:
+                self._save_goals()
+            loc_label = "系统提示词" if loc == "system" else "用户消息末尾（不落盘）"
+            return {
+                "status": "success",
+                "message": f"Goal 已设置（注入位置：{loc_label}）：{things}",
+            }
+
+        return {"status": "error", "message": f"未识别的 action：{action}。支持 get / set / clear"}
 
     @filter.llm_tool(name="tool_get_calendar")
     async def tool_get_calendar(
