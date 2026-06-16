@@ -82,7 +82,7 @@ def _load_schema_defaults() -> dict:
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.3",
+    "1.6.4",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2350,16 +2350,23 @@ class ToolboxPlugin(Star):
                                 request.system_prompt = goal_block
                     else:
                         # 追加到当前用户消息末尾（不写入 contexts/历史）
-                        if hasattr(request, "prompt") and request.prompt:
-                            request.prompt = request.prompt.rstrip() + f"\n\n{goal_block}"
-                        elif hasattr(request, "extra_user_content_parts"):
-                            from astrbot.core.provider.entites import ProviderRequest  # noqa: F401
+                        # 优先复用已有 part 的类型（TextPart，带 model_dump_for_context），
+                        # 避免使用 Plain 组件导致 'Plain' object has no attribute 'model_dump_for_context'
+                        if (
+                            hasattr(request, "extra_user_content_parts")
+                            and request.extra_user_content_parts
+                        ):
                             try:
-                                from astrbot.core.message.components import Plain
-                                part = Plain(text=f"\n{goal_block}")
-                                request.extra_user_content_parts.append(part)
-                            except Exception:
-                                pass
+                                request.extra_user_content_parts.append(
+                                    type(request.extra_user_content_parts[0])(
+                                        text=f"\n{goal_block}"
+                                    )
+                                )
+                            except Exception as e:
+                                logger.debug(f"[goal] 注入到 extra_user_content_parts 失败: {e}")
+                        elif hasattr(request, "prompt"):
+                            current = request.prompt if isinstance(request.prompt, str) else ""
+                            request.prompt = current.rstrip() + f"\n\n{goal_block}"
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
