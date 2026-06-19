@@ -37,12 +37,16 @@ DEFAULT_AUDIT_PROMPT = (
     "- 如果对话中用户明确提出或质疑ai的回复风格不对，优先指引ai重新回顾自身提示词，基于自身设定重新组织语言。\n"
     "- 矫正规则可以适当放宽，忽略轻微偏移，但若触发重点或禁止性规则，则必须说明。\n"
     "- 前次调整方向仅供参考，若非必要或与审核标准相悖，可以忽略。\n"
+    "- 当LLM回复中含有用户设定的触发关键词时，LLM触发关键词不为空。但是数据仅供参考，误判时可以忽略。\n"
     "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。\n"
-    "- 矫正指示应当引导AI调整后续回复内容，但避免指出具体错误案例。\n\n"
+    "- 矫正指示应当引导AI调整后续回复内容，但避免指出具体错误案例。\n"
+    "- 矫正指示会直接注入到AI下一轮回复的上下文中，请确保指示内容适合直接面向AI。\n\n"
     "[审核标准]\n"
-    "{criteria}\n\n"
+    "{criteria}\n\n"    
     "[前次调整方向]\n"
-    "{last_correction}\n\n"
+    "{last_correction}\n"
+    "[LLM触发关键词]\n"
+    "{triggered_keywords}\n\n"
     "---\n"
     "[待审核的对话]\n\n"
     "{conversation}\n\n"
@@ -56,6 +60,7 @@ DEFAULT_PERSONA_AUDIT_PROMPT = (
     "输出格式：\n"
     "- 如果AI的回复完全符合所设定人格 → 回复：无需调整\n"
     "- 如果任何方面不符合人格设定 → 回复：调整方向:<简洁、清晰的校正指示>（例如：“建议使用更温柔的语气”“建议增加口语化表达”“建议减少正式用语”）\n"
+    "- 请侧重留意AI的说话方式、语气、用词是否与人格设定一致，内容是否体现或有违了人格特征。\n"
     "- 如果无法判断 → 回复：无法进行审核\n"
     "- 如果对话中用户明确要求AI改变风格，则以用户要求为优先。\n\n"
     "[AI人格设定]\n"
@@ -172,6 +177,10 @@ class ContentAuditLoop:
         self._pending_keyword: dict[str, bool] = {}
         self._pending_keyword_lock = asyncio.Lock()
 
+        # session_id -> set[str]（触发保持位时记录的具体关键词，供后续审核 LLM 参考）
+        self._keywords_triggered: dict[str, set[str]] = {}
+        self._keywords_triggered_lock = asyncio.Lock()
+
         # ---- 人格遵循审核状态（独立于内容审核） ----
         self._pa_counters: dict[str, int] = {}
         self._pa_counter_lock = asyncio.Lock()
@@ -221,7 +230,7 @@ class ContentAuditLoop:
         if user_message_text:
             await self._audit_record_message(key, "user", user_message_text, event)
 
-        logger.info(
+        logger.debug(
             f"[ContentAudit] on_ai_reply 被调用，key={key}，回复长度 {len(reply_text)}"
         )
 
@@ -241,11 +250,16 @@ class ContentAuditLoop:
         should_trigger = False
         trigger_reason = ""
         has_pending = False
+        pending_keywords: set[str] = set()
 
         async with self._pending_keyword_lock:
             has_pending = self._pending_keyword.pop(key, False)
 
         if has_pending:
+            # 读出之前保持位记录的具体关键词
+            async with self._keywords_triggered_lock:
+                pending_keywords = self._keywords_triggered.pop(key, set())
+
             if not self._keyword_audit_enabled:
                 self._log_debug(
                     f"[ContentAudit] key={key} 有关键词保持位但关键词审核已关闭，丢弃"
@@ -255,10 +269,15 @@ class ContentAuditLoop:
                 trigger_reason = "保持位触发"
                 logger.info(
                     f"[ContentAudit] key={key} 保持位触发审核，"
-                    f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}"
+                    f"当前计数 {current_count} >= 最小轮数 {self._min_rounds}，"
+                    f"保持位关键词: {pending_keywords}"
                 )
             else:
-                self._pending_keyword[key] = True
+                # 计数还不够，重新设保持位（保留之前的关键词）
+                async with self._pending_keyword_lock:
+                    self._pending_keyword[key] = True
+                async with self._keywords_triggered_lock:
+                    self._keywords_triggered[key] = pending_keywords
                 self._log_debug(
                     f"[ContentAudit] key={key} 保持位已消费但当前计数 "
                     f"{current_count} < 最小轮数 {self._min_rounds}，重新设置保持位"
@@ -282,20 +301,26 @@ class ContentAuditLoop:
                 f"回复: {reply_text[:60]}..."
             )
 
+        # 合并保持位关键词和本轮关键词
+        all_keywords: list[str] = list(set(pending_keywords) | set(matched_keywords))
+
         # ---- 第五步：决定是否触发审核 ----
         if not should_trigger:
             if is_keyword_trigger:
                 if current_count >= self._min_rounds:
                     should_trigger = True
-                    trigger_reason = "关键词触发"
+                    trigger_reason = f"关键词触发(本轮: {matched_keywords})"
                 else:
                     logger.info(
                         f"[ContentAudit] key={key} 关键词触发但当前计数 "
                         f"{current_count} < 最小轮数 {self._min_rounds}，"
                         f"设保持位等待下一轮"
                     )
+                    # 保存本轮关键词供后续保持位消费
                     async with self._pending_keyword_lock:
                         self._pending_keyword[key] = True
+                    async with self._keywords_triggered_lock:
+                        self._keywords_triggered[key] = all_keywords
                     return
             elif current_count >= self._audit_rounds:
                 if self._min_rounds > 0 and current_count < self._min_rounds:
@@ -328,6 +353,11 @@ class ContentAuditLoop:
             if prev and prev.strip():
                 last_correction = prev.strip()
 
+        # 组装关键词触发信息（供审核 LLM 参考）
+        triggered_keywords_str = (
+            f"触发关键词: {', '.join(all_keywords)}" if all_keywords else "无"
+        )
+
         # 检查是否已有运行中的后台任务
         async with self._running_tasks_lock:
             has_running = (
@@ -359,6 +389,7 @@ class ContentAuditLoop:
                 provider=provider,
                 conversation_text=conversation_text,
                 last_correction=last_correction,
+                triggered_keywords=triggered_keywords_str,
             )
         )
         async with self._running_tasks_lock:
@@ -370,12 +401,13 @@ class ContentAuditLoop:
         provider: Any,
         conversation_text: str,
         last_correction: str,
+        triggered_keywords: str = "无",
     ) -> None:
         """后台审核任务：调用审核 LLM 并存储结果。"""
         try:
             logger.info(f"[ContentAudit] 后台任务: 会话 {session_id} 调用审核 LLM...")
             correction = await self._call_audit_llm(
-                provider, conversation_text, last_correction
+                provider, conversation_text, last_correction, triggered_keywords
             )
             logger.info(
                 f"[ContentAudit] 后台任务: 会话 {session_id} 审核 LLM 返回: "
@@ -449,6 +481,7 @@ class ContentAuditLoop:
                             provider=provider,
                             conversation_text=new_conversation,
                             last_correction=last_correction,
+                            triggered_keywords=triggered_keywords,
                         )
                     )
                     async with self._running_tasks_lock:
@@ -690,6 +723,20 @@ class ContentAuditLoop:
         if not self._persona_audit_enabled:
             return
 
+        # 计数器 +1
+        async with self._pa_counter_lock:
+            current_count = self._pa_counters.get(key, 0) + 1
+            self._pa_counters[key] = current_count
+
+        # 检查是否达到轮数阈值（仅轮数触发，无关键词）
+        if current_count < self._persona_audit_rounds:
+            self._log_debug(
+                f"[PersonaAudit] key={key} 未达触发条件 ({current_count}/{self._persona_audit_rounds})，跳过"
+            )
+            return
+
+        logger.info(f"[PersonaAudit] key={key} 达到轮数阈值，开始审核...")
+
         # 动态解析人格设定（支持 AstrBot 人格联动）
         resolved_prompt = await self._resolve_persona_prompt(event)
         if not resolved_prompt:
@@ -705,20 +752,6 @@ class ContentAuditLoop:
 
         # 用户消息已由 on_ai_reply 写入 _audit_chats，无需重复写入
         # AI 回复也已由 on_ai_reply 写入 _audit_chats，无需重复写入
-
-        # 计数器 +1
-        async with self._pa_counter_lock:
-            current_count = self._pa_counters.get(key, 0) + 1
-            self._pa_counters[key] = current_count
-
-        # 检查是否达到轮数阈值（仅轮数触发，无关键词）
-        if current_count < self._persona_audit_rounds:
-            self._log_debug(
-                f"[PersonaAudit] key={key} 未达触发条件 ({current_count}/{self._persona_audit_rounds})，跳过"
-            )
-            return
-
-        logger.info(f"[PersonaAudit] key={key} 达到轮数阈值，开始审核...")
 
         fetch_count = current_count * 2
         conversation_text = await self._fetch_recent_conversation(key, fetch_count)
@@ -1029,8 +1062,15 @@ class ContentAuditLoop:
         provider: Any,
         conversation_text: str,
         last_correction: str,
+        triggered_keywords: str = "无",
     ) -> str | None:
         """调用审核 LLM，返回校正文本或 None（表示无需调整）。
+
+        Args:
+            provider: LLM Provider 实例
+            conversation_text: 待审核的对话文本
+            last_correction: 上次校正方向
+            triggered_keywords: 触发本次审核的用户设定关键词（用于 LLM 参考）
 
         Returns:
             str | None:
@@ -1042,11 +1082,12 @@ class ContentAuditLoop:
             criteria=self._criteria,
             last_correction=last_correction or "无",
             conversation=conversation_text,
+            triggered_keywords=triggered_keywords,
         )
 
         self._log_debug(
             "传入审核 LLM 信息：\n"
-            f"{DEFAULT_AUDIT_PROMPT.format(criteria=self._criteria[:100], last_correction=last_correction[:50] or '无', conversation=conversation_text)}\n"
+            f"{DEFAULT_AUDIT_PROMPT.format(criteria=self._criteria[:100], last_correction=last_correction[:50] or '无', conversation=conversation_text, triggered_keywords=triggered_keywords)}\n"
             "\n---"
         )
 
