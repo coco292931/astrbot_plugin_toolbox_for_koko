@@ -83,7 +83,7 @@ from .tools.calendar import run_get_calendar
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.5",
+    "1.6.6",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2666,17 +2666,13 @@ class ToolboxPlugin(Star):
         umo = event.unified_msg_origin
 
         try:
-            persona_mgr = getattr(self.context, "persona_manager", None)
-            prompt_text = ""
-            if persona_mgr:
-                personality = await persona_mgr.get_default_persona_v3(umo=umo)
-                if personality and hasattr(personality, "prompt"):
-                    prompt_text = personality.prompt.strip()
-
+            prompt_text = await self._resolve_recall_prompt(event)
             if not prompt_text:
                 await event.send(
                     MessageChain().message(
-                        "未读取到当前对话的 AstrBot 人格设定，无法注入。"
+                        "未读取到当前对话的 AstrBot 人格设定，无法注入。\n"
+                        "可在插件配置「人格遵循审核」中设置 persona_audit_prompt 作为回退人格，"
+                        "或开启 use_astrbot_persona 以读取 AstrBot 人格管理器。"
                     )
                 )
                 event.stop_event()
@@ -2702,6 +2698,65 @@ class ToolboxPlugin(Star):
             await event.send(MessageChain().message(f"读取人格设定失败：{e}"))
 
         event.stop_event()
+
+    async def _resolve_recall_prompt(self, event: AstrMessageEvent) -> str:
+        """解析 Recall 要注入的人格 prompt。
+
+        优先级：
+          1. use_astrbot_persona=True 时从 AstrBot PersonaManager 读取
+             （优先 v3 当前对话默认人格，其次 v2 指定人格 ID）
+          2. 回退到 persona_audit_prompt 静态配置
+          3. 返回空字符串
+
+        Note:
+          Personality（v3）是 TypedDict（dict），必须用 dict 方式访问键值。
+          Persona（v2）是 ORM 对象，用属性访问。
+        """
+        umo = getattr(event, "unified_msg_origin", None)
+
+        # 优先级 1: use_astrbot_persona 启用时从 PersonaManager 读取
+        if self.use_astrbot_persona:
+            try:
+                persona_mgr = getattr(self.context, "persona_manager", None)
+                if persona_mgr:
+                    # 1a. v3 当前对话默认人格（推荐，兼容性更好）
+                    personality = await persona_mgr.get_default_persona_v3(umo=umo)
+                    if personality:
+                        text = ""
+                        if isinstance(personality, dict):
+                            text = personality.get("prompt", "")
+                        elif hasattr(personality, "prompt"):
+                            text = personality.prompt
+                        if isinstance(text, str) and text.strip():
+                            return text.strip()
+
+                    # 1b. v2 指定人格 ID（兜底）
+                    select_id = (self.select_persona or "").strip()
+                    if select_id:
+                        try:
+                            persona = await persona_mgr.get_persona(select_id)
+                            if persona:
+                                text = ""
+                                if isinstance(persona, dict):
+                                    text = persona.get("system_prompt") or persona.get(
+                                        "prompt", ""
+                                    )
+                                elif hasattr(persona, "system_prompt"):
+                                    text = persona.system_prompt
+                                elif hasattr(persona, "prompt"):
+                                    text = persona.prompt
+                                if isinstance(text, str) and text.strip():
+                                    return text.strip()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"[recall] 从 PersonaManager 读取人格失败: {e}")
+
+        # 优先级 2: 回退到静态 persona_audit_prompt
+        if self.persona_audit_prompt:
+            return self.persona_audit_prompt
+
+        return ""
 
     def _goal_get_response(self, umo: str) -> dict:
         """读取并返回当前 Goal 信息的公共逻辑。"""
