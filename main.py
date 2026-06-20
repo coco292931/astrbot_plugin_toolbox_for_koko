@@ -2666,7 +2666,7 @@ class ToolboxPlugin(Star):
         umo = event.unified_msg_origin
 
         try:
-            prompt_text = await self._resolve_recall_prompt(event)
+            prompt_text, persona_name = await self._resolve_recall_prompt(event)
             if not prompt_text:
                 await event.send(
                     MessageChain().message(
@@ -2681,13 +2681,14 @@ class ToolboxPlugin(Star):
             # 设置一次性注入标记
             self._recall_pending[umo] = prompt_text
 
+            name_tag = f"（{persona_name}）" if persona_name else ""
             preview = prompt_text[:100]
             if len(prompt_text) > 100:
                 preview += "..."
 
             await event.send(
                 MessageChain().message(
-                    f"🧠 Recall 已就绪！下次对话时将注入人格回顾：\n{preview}"
+                    f"🧠 Recall 已就绪！人格：{name_tag}。\n下次对话时将注入人格回顾：\n{preview}"
                 )
             )
             logger.info(
@@ -2699,18 +2700,12 @@ class ToolboxPlugin(Star):
 
         event.stop_event()
 
-    async def _resolve_recall_prompt(self, event: AstrMessageEvent) -> str:
+    async def _resolve_recall_prompt(self, event: AstrMessageEvent) -> tuple[str, str]:
         """解析 Recall 要注入的人格 prompt。
 
-        优先级：
-          1. use_astrbot_persona=True 时从 AstrBot PersonaManager 读取
-             （优先 v3 当前对话默认人格，其次 v2 指定人格 ID）
-          2. 回退到 persona_audit_prompt 静态配置
-          3. 返回空字符串
-
-        Note:
-          Personality（v3）是 TypedDict（dict），必须用 dict 方式访问键值。
-          Persona（v2）是 ORM 对象，用属性访问。
+        Returns:
+            (prompt_text, persona_name): prompt 文本和人格名称。
+            读取失败时返回 ("", "")。
         """
         umo = getattr(event, "unified_msg_origin", None)
 
@@ -2723,12 +2718,15 @@ class ToolboxPlugin(Star):
                     personality = await persona_mgr.get_default_persona_v3(umo=umo)
                     if personality:
                         text = ""
+                        name = ""
                         if isinstance(personality, dict):
                             text = personality.get("prompt", "")
+                            name = personality.get("name", "")
                         elif hasattr(personality, "prompt"):
                             text = personality.prompt
+                            name = getattr(personality, "name", "")
                         if isinstance(text, str) and text.strip():
-                            return text.strip()
+                            return text.strip(), name.strip() or "AstrBot 默认人格"
 
                     # 1b. v2 指定人格 ID（兜底）
                     select_id = (self.select_persona or "").strip()
@@ -2737,16 +2735,22 @@ class ToolboxPlugin(Star):
                             persona = await persona_mgr.get_persona(select_id)
                             if persona:
                                 text = ""
+                                name = select_id
                                 if isinstance(persona, dict):
                                     text = persona.get("system_prompt") or persona.get(
                                         "prompt", ""
                                     )
+                                    name = persona.get("name") or persona.get(
+                                        "persona_name", select_id
+                                    )
                                 elif hasattr(persona, "system_prompt"):
                                     text = persona.system_prompt
+                                    name = getattr(persona, "name", select_id)
                                 elif hasattr(persona, "prompt"):
                                     text = persona.prompt
+                                    name = getattr(persona, "name", select_id)
                                 if isinstance(text, str) and text.strip():
-                                    return text.strip()
+                                    return text.strip(), str(name).strip()
                         except Exception:
                             pass
             except Exception as e:
@@ -2754,9 +2758,9 @@ class ToolboxPlugin(Star):
 
         # 优先级 2: 回退到静态 persona_audit_prompt
         if self.persona_audit_prompt:
-            return self.persona_audit_prompt
+            return self.persona_audit_prompt, "插件静态配置"
 
-        return ""
+        return "", ""
 
     def _goal_get_response(self, umo: str) -> dict:
         """读取并返回当前 Goal 信息的公共逻辑。"""
