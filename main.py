@@ -49,40 +49,41 @@ from .tools.send_msg import run_send_message
 from .tools.calendar import run_get_calendar
 
 
-def _load_schema_defaults() -> dict:
-    """Load default values from local _conf_schema_config.json when available."""
-    cfg_path = Path(__file__).with_name("_conf_schema_config.json")
-    if not cfg_path.exists():
-        return {}
+# def _load_schema_defaults() -> dict:
+#     """Load default values from local _conf_schema_config.json when available."""
+#     cfg_path = Path(__file__).with_name("_conf_schema_config.json")
+#     if not cfg_path.exists():
+#         return {}
 
-    try:
-        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {}
+#     try:
+#         raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+#         if not isinstance(raw, dict):
+#             return {}
 
-        defaults = {}
+#         defaults = {}
 
-        def _collect_defaults(node: dict) -> None:
-            for key, meta in node.items():
-                if not isinstance(meta, dict):
-                    continue
-                if "default" in meta:
-                    defaults[key] = meta["default"]
-                items = meta.get("items")
-                if isinstance(items, dict):
-                    _collect_defaults(items)
+#         def _collect_defaults(node: dict) -> None:
+#             for key, meta in node.items():
+#                 if not isinstance(meta, dict):
+#                     continue
+#                 if "default" in meta:
+#                     defaults[key] = meta["default"]
+#                 items = meta.get("items")
+#                 if isinstance(items, dict):
+#                     _collect_defaults(items)
 
-        _collect_defaults(raw)
-        return defaults
-    except Exception as e:
-        logger.warning(f"读取 _conf_schema_config.json 失败，忽略默认配置: {e}")
-        return {}
+#         _collect_defaults(raw)
+#         return defaults
+#     except Exception as e:
+#         logger.warning(f"读取 _conf_schema_config.json 失败，忽略默认配置: {e}")
+#         return {}
+
 
 @register(
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.4",
+    "1.6.5",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -166,12 +167,12 @@ class ToolboxPlugin(Star):
 
         # ---- content_audit 配置加载 ----
         _raw_audit_enabled = self.config.get("content_audit_enabled", "KEY_NOT_FOUND")
-        logger.debug(
-            f"[content_audit] __init__ 配置检查: "
-            f"config keys={list(self.config.keys())}, "
-            f"raw content_audit_enabled={_raw_audit_enabled!r}, "
-            f"type={type(_raw_audit_enabled).__name__}"
-        )
+        # logger.debug(
+        #     f"[content_audit] __init__ 配置检查: "
+        #     f"config keys={list(self.config.keys())}, "
+        #     f"raw content_audit_enabled={_raw_audit_enabled!r}, "
+        #     f"type={type(_raw_audit_enabled).__name__}"
+        # )
         self.content_audit_enabled = self._safe_bool(
             self.config.get("content_audit_enabled", False), False
         )
@@ -206,10 +207,10 @@ class ToolboxPlugin(Star):
         )
         if self.content_audit_inject_mode not in ("prompt", "conversation"):
             self.content_audit_inject_mode = "conversation"
-        logger.debug(
-            f"[content_audit] __init__ 实例化条件: "
-            f"content_audit_enabled={self.content_audit_enabled}"
-        )
+        # logger.debug(
+        #     f"[content_audit] __init__ 实例化条件: "
+        #     f"content_audit_enabled={self.content_audit_enabled}"
+        # )
 
         # ---- persona_audit 配置加载 ----
         self.persona_audit_enabled = self._safe_bool(
@@ -235,14 +236,14 @@ class ToolboxPlugin(Star):
             self.config.get("use_astrbot_persona", False), False
         )
         self.select_persona = str(self.config.get("select_persona", "") or "").strip()
-        logger.debug(
-            f"[persona_audit] __init__ 配置: "
-            f"enabled={self.persona_audit_enabled}, "
-            f"rounds={self.persona_audit_rounds}, "
-            f"prompt_len={len(self.persona_audit_prompt)}, "
-            f"use_astrbot_persona={self.use_astrbot_persona}, "
-            f"select_persona={self.select_persona!r}"
-        )
+        # logger.debug(
+        #     f"[persona_audit] __init__ 配置: "
+        #     f"enabled={self.persona_audit_enabled}, "
+        #     f"rounds={self.persona_audit_rounds}, "
+        #     f"prompt_len={len(self.persona_audit_prompt)}, "
+        #     f"use_astrbot_persona={self.use_astrbot_persona}, "
+        #     f"select_persona={self.select_persona!r}"
+        # )
 
         if self.content_audit_enabled:
             self.content_audit = ContentAuditLoop(self)
@@ -345,9 +346,7 @@ class ToolboxPlugin(Star):
         self.calendar_ical_url = str(
             self.config.get("calendar_ical_url", "") or ""
         ).strip()
-        self.calendar_proxy = str(
-            self.config.get("calendar_proxy", "") or ""
-        ).strip()
+        self.calendar_proxy = str(self.config.get("calendar_proxy", "") or "").strip()
 
         # 构建工具注册表（用于 call-search-run 三段式调用）
         self._tool_registry = self._build_tool_registry()
@@ -419,6 +418,10 @@ class ToolboxPlugin(Star):
         self._goals_lock = asyncio.Lock()
         self._goals_file = self.data_dir / "goals.json"
         self._goals: dict[str, dict] = self._load_goals()
+
+        # Recall 一次性注入标记：key = unified_msg_origin，value = 人格 prompt 文本
+        # 用户发送 /recall 时设置，下一次 on_llm_request 注入后立即清除
+        self._recall_pending: dict[str, str] = {}
 
     def _load_goals(self) -> dict[str, dict]:
         """从磁盘加载 goals.json，返回 dict。"""
@@ -1352,7 +1355,7 @@ class ToolboxPlugin(Star):
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "\"get\"",
+                        "description": '"get"',
                     }
                 },
                 "required": [],
@@ -2363,10 +2366,56 @@ class ToolboxPlugin(Star):
                                     )
                                 )
                             except Exception as e:
-                                logger.debug(f"[goal] 注入到 extra_user_content_parts 失败: {e}")
+                                logger.debug(
+                                    f"[goal] 注入到 extra_user_content_parts 失败: {e}"
+                                )
                         elif hasattr(request, "prompt"):
-                            current = request.prompt if isinstance(request.prompt, str) else ""
+                            current = (
+                                request.prompt
+                                if isinstance(request.prompt, str)
+                                else ""
+                            )
                             request.prompt = current.rstrip() + f"\n\n{goal_block}"
+
+            # ---- 注入 Recall（一次性人格回顾） ----
+            try:
+                recall_content = self._recall_pending.pop(
+                    event.unified_msg_origin, None
+                )
+                if recall_content:
+                    recall_block = (
+                        f"<system_WARNING>请回顾你的人格设定并严格遵循："
+                        f"{recall_content}</system_WARNING>"
+                    )
+                    if (
+                        hasattr(request, "extra_user_content_parts")
+                        and request.extra_user_content_parts
+                    ):
+                        try:
+                            request.extra_user_content_parts.append(
+                                type(request.extra_user_content_parts[0])(
+                                    text=f"\n{recall_block}"
+                                )
+                            )
+                            logger.info(
+                                f"[recall] 已一次性注入人格回顾(conversation)，"
+                                f"session={event.unified_msg_origin}"
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                f"[recall] 注入到 extra_user_content_parts 失败: {e}"
+                            )
+                    elif hasattr(request, "system_prompt"):
+                        if request.system_prompt:
+                            request.system_prompt += f"\n{recall_block}"
+                        else:
+                            request.system_prompt = recall_block
+                        logger.info(
+                            f"[recall] 已一次性注入人格回顾(system_prompt)，"
+                            f"session={event.unified_msg_origin}"
+                        )
+            except Exception as e:
+                logger.debug(f"[recall] 注入人格回顾失败: {e}")
         except Exception as e:
             logger.debug(f"[on_llm_request] 注入工具使用规范失败: {e}")
 
@@ -2508,7 +2557,11 @@ class ToolboxPlugin(Star):
             if not entry:
                 await event.send(MessageChain().message("当前会话没有设置 Goal。"))
             else:
-                loc_label = "系统提示词" if entry.get("location", "system") == "system" else "用户消息末尾（不落盘）"
+                loc_label = (
+                    "系统提示词"
+                    if entry.get("location", "system") == "system"
+                    else "用户消息末尾（不落盘）"
+                )
                 set_by = entry.get("set_by", "")
                 set_at = entry.get("set_at", "")
                 await event.send(
@@ -2556,7 +2609,9 @@ class ToolboxPlugin(Star):
             }
             async with self._goals_lock:
                 self._save_goals()
-            loc_label = "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
+            loc_label = (
+                "系统提示词" if location == "system" else "用户消息末尾（不落盘）"
+            )
             await event.send(
                 MessageChain().message(
                     f"✅ Goal 已设置（注入位置：{loc_label}）：\n{things}"
@@ -2593,11 +2648,70 @@ class ToolboxPlugin(Star):
             things = text
         return location, things
 
+    # ---------------- Recall 人格回顾命令（一次性注入） ----------------
+
+    @filter.command("recall")
+    async def recall_command(self, event: AstrMessageEvent):
+        """Recall 人格回顾命令。从 AstrBot 读取当前对话的人格设定，
+        以下一次 LLM 请求时以 <system_WARNING> 标签一次性注入，
+        引导 AI 回顾自身人格设定。
+
+        用法：
+          /recall    读取人格设定并排队注入（一次性，下次 LLM 请求后自动清除）
+
+        原理：从 AstrBot PersonaManager 读取当前对话的人格 prompt，
+        设置到 _recall_pending 标记中，on_llm_request 检测到该标记后
+        以 <system_WARNING> 注入到 extra_user_content_parts，注入后立即清除标记。
+        """
+        umo = event.unified_msg_origin
+
+        try:
+            persona_mgr = getattr(self.context, "persona_manager", None)
+            prompt_text = ""
+            if persona_mgr:
+                personality = await persona_mgr.get_default_persona_v3(umo=umo)
+                if personality and hasattr(personality, "prompt"):
+                    prompt_text = personality.prompt.strip()
+
+            if not prompt_text:
+                await event.send(
+                    MessageChain().message(
+                        "未读取到当前对话的 AstrBot 人格设定，无法注入。"
+                    )
+                )
+                event.stop_event()
+                return
+
+            # 设置一次性注入标记
+            self._recall_pending[umo] = prompt_text
+
+            preview = prompt_text[:100]
+            if len(prompt_text) > 100:
+                preview += "..."
+
+            await event.send(
+                MessageChain().message(
+                    f"🧠 Recall 已就绪！下次对话时将注入人格回顾：\n{preview}"
+                )
+            )
+            logger.info(
+                f"[recall] 已设置一次性注入标记，session={umo}, prompt_len={len(prompt_text)}"
+            )
+        except Exception as e:
+            logger.error(f"[recall] 读取人格设定失败: {e}")
+            await event.send(MessageChain().message(f"读取人格设定失败：{e}"))
+
+        event.stop_event()
+
     def _goal_get_response(self, umo: str) -> dict:
         """读取并返回当前 Goal 信息的公共逻辑。"""
         entry = self._goals.get(umo)
         if not entry:
-            return {"status": "success", "has_goal": False, "message": "当前会话没有设置 Goal。"}
+            return {
+                "status": "success",
+                "has_goal": False,
+                "message": "当前会话没有设置 Goal。",
+            }
         return {
             "status": "success",
             "has_goal": True,
@@ -2658,7 +2772,10 @@ class ToolboxPlugin(Star):
                 "message": f"Goal 已设置（注入位置：{loc_label}）：{things}",
             }
 
-        return {"status": "error", "message": f"未识别的 action：{action}。支持 get / set / clear"}
+        return {
+            "status": "error",
+            "message": f"未识别的 action：{action}。支持 get / set / clear",
+        }
 
     @filter.llm_tool(name="tool_get_calendar")
     async def tool_get_calendar(
@@ -2698,18 +2815,6 @@ class ToolboxPlugin(Star):
         }
         message = await run_get_calendar(self, args)
         return {"status": "success", "message": message}
-        umo = event.unified_msg_origin
-        entry = self._goals.get(umo)
-        if not entry:
-            return {"status": "success", "has_goal": False, "message": "当前会话没有设置 Goal。"}
-        return {
-            "status": "success",
-            "has_goal": True,
-            "things": entry.get("things", ""),
-            "location": entry.get("location", "system"),
-            "set_at": entry.get("set_at", ""),
-            "set_by": entry.get("set_by", ""),
-        }
 
     # ---------------- Mnemosyne 向量查找（LLM 内部工具） ----------------
     @filter.llm_tool(name="search_memory_vector")
