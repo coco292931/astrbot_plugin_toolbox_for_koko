@@ -723,6 +723,23 @@ class ContentAuditLoop:
         if not self._persona_audit_enabled:
             return
 
+        key = await self._make_key(event)
+        if not key:
+            self._log_debug("[PersonaAudit] 跳过: 无法生成 key")
+            return
+
+        # 动态解析人格设定（支持 AstrBot 人格联动）
+        resolved_prompt = await self._resolve_persona_prompt(event)
+        if not resolved_prompt:
+            self._log_debug("[PersonaAudit] 跳过: 未解析到人格设定")
+            return
+        # 缓存解析结果，供队列重试使用
+        self._pa_prompt_cache = resolved_prompt
+
+        if not provider:
+            self._log_debug("[PersonaAudit] 跳过: provider 为空")
+            return
+
         # 计数器 +1
         async with self._pa_counter_lock:
             current_count = self._pa_counters.get(key, 0) + 1
@@ -736,19 +753,6 @@ class ContentAuditLoop:
             return
 
         logger.info(f"[PersonaAudit] key={key} 达到轮数阈值，开始审核...")
-
-        # 动态解析人格设定（支持 AstrBot 人格联动）
-        resolved_prompt = await self._resolve_persona_prompt(event)
-        if not resolved_prompt:
-            return
-        # 缓存解析结果，供队列重试使用
-        self._pa_prompt_cache = resolved_prompt
-
-        key = await self._make_key(event)
-        if not key:
-            return
-        if not provider:
-            return
 
         # 用户消息已由 on_ai_reply 写入 _audit_chats，无需重复写入
         # AI 回复也已由 on_ai_reply 写入 _audit_chats，无需重复写入

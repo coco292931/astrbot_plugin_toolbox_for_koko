@@ -422,6 +422,7 @@ class ToolboxPlugin(Star):
         # Recall 一次性注入标记：key = unified_msg_origin，value = 人格 prompt 文本
         # 用户发送 /recall 时设置，下一次 on_llm_request 注入后立即清除
         self._recall_pending: dict[str, str] = {}
+        self._recall_pending_lock = asyncio.Lock()
 
     def _load_goals(self) -> dict[str, dict]:
         """从磁盘加载 goals.json，返回 dict。"""
@@ -2379,9 +2380,10 @@ class ToolboxPlugin(Star):
 
             # ---- 注入 Recall（一次性人格回顾） ----
             try:
-                recall_content = self._recall_pending.pop(
-                    event.unified_msg_origin, None
-                )
+                async with self._recall_pending_lock:
+                    recall_content = self._recall_pending.pop(
+                        event.unified_msg_origin, None
+                    )
                 if recall_content:
                     recall_block = (
                         f"<system_WARNING>用户手动触发了人格召回！ 这说明你的回复已经严重背离了人格设定！这是极度危险的行为！\n"
@@ -2389,6 +2391,7 @@ class ToolboxPlugin(Star):
                         f"请严格遵守：\n"
                         f"{recall_content}</system_WARNING>"
                     )
+                    injected = False
                     if (
                         hasattr(request, "extra_user_content_parts")
                         and request.extra_user_content_parts
@@ -2403,11 +2406,12 @@ class ToolboxPlugin(Star):
                                 f"[recall] 已一次性注入人格回顾(conversation)，"
                                 f"session={event.unified_msg_origin}"
                             )
+                            injected = True
                         except Exception as e:
                             logger.debug(
                                 f"[recall] 注入到 extra_user_content_parts 失败: {e}"
                             )
-                    elif hasattr(request, "system_prompt"):
+                    if not injected and hasattr(request, "system_prompt"):
                         if request.system_prompt:
                             request.system_prompt += f"\n{recall_block}"
                         else:
@@ -2415,6 +2419,11 @@ class ToolboxPlugin(Star):
                         logger.info(
                             f"[recall] 已一次性注入人格回顾(system_prompt)，"
                             f"session={event.unified_msg_origin}"
+                        )
+                        injected = True
+                    if not injected:
+                        logger.warning(
+                            f"[recall] 无可用的注入点位，session={event.unified_msg_origin}"
                         )
             except Exception as e:
                 logger.debug(f"[recall] 注入人格回顾失败: {e}")
@@ -2681,7 +2690,8 @@ class ToolboxPlugin(Star):
                 return
 
             # 设置一次性注入标记
-            self._recall_pending[umo] = prompt_text
+            async with self._recall_pending_lock:
+                self._recall_pending[umo] = prompt_text
 
             name_tag = f"（{persona_name}）" if persona_name else ""
             preview = prompt_text[:100]
