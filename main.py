@@ -20,7 +20,6 @@ from .core.config import extract_grouped_runtime_config, load_schema_defaults
 from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
 from .core.image_caption import ImageCaptionHandler
-from .core.image_generation_result import ImageGenerationResultHandler
 from .core.content_audit import ContentAuditLoop
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
@@ -48,42 +47,11 @@ from .tools.local_memory import (
 from .tools.send_msg import run_send_message
 from .tools.calendar import run_get_calendar
 
-
-# def _load_schema_defaults() -> dict:
-#     """Load default values from local _conf_schema_config.json when available."""
-#     cfg_path = Path(__file__).with_name("_conf_schema_config.json")
-#     if not cfg_path.exists():
-#         return {}
-
-#     try:
-#         raw = json.loads(cfg_path.read_text(encoding="utf-8"))
-#         if not isinstance(raw, dict):
-#             return {}
-
-#         defaults = {}
-
-#         def _collect_defaults(node: dict) -> None:
-#             for key, meta in node.items():
-#                 if not isinstance(meta, dict):
-#                     continue
-#                 if "default" in meta:
-#                     defaults[key] = meta["default"]
-#                 items = meta.get("items")
-#                 if isinstance(items, dict):
-#                     _collect_defaults(items)
-
-#         _collect_defaults(raw)
-#         return defaults
-#     except Exception as e:
-#         logger.warning(f"读取 _conf_schema_config.json 失败，忽略默认配置: {e}")
-#         return {}
-
-
 @register(
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.6",
+    "1.6.7",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -281,26 +249,8 @@ class ToolboxPlugin(Star):
             32,
             4096,
         )
-        self.image_generation_result_hook_enabled = self._safe_bool(
-            self.config.get("image_generation_result_hook_enabled", True),
-            True,
-        )
-        self.image_generation_result_prompt_template = str(
-            self.config.get("image_generation_result_prompt_template", "") or ""
-        ).strip()
-        self.image_generation_result_max_images = self._safe_int(
-            self.config.get("image_generation_result_max_images", 1),
-            1,
-            1,
-            10,
-        )
+
         self.image_caption_handler = ImageCaptionHandler(self)
-        self.image_generation_result_handler = ImageGenerationResultHandler(self)
-        logger.info(
-            "[ImageGenResult] 生图结果识图功能已初始化: "
-            f"enabled={self.image_generation_result_hook_enabled}, "
-            f"max_images={self.image_generation_result_max_images}"
-        )
 
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(
@@ -2241,9 +2191,6 @@ class ToolboxPlugin(Star):
         self, event: AstrMessageEvent, request: Any, *args, **kwargs
     ) -> None:
         try:
-            # ---- 生图完成结果后处理：为 image_generation 唤醒请求补充识图摘要 ----
-            await self.image_generation_result_handler.process(event, request)
-
             # ---- 图片转述前处理：接管图片转述，不让 AstrBot 处理 ----
             # 独立模块 ImageCaptionHandler 负责下载、降级、类型识别
             await self.image_caption_handler.process(event, request)
@@ -2498,39 +2445,7 @@ class ToolboxPlugin(Star):
         except Exception as e:
             logger.debug(f"[on_llm_response] 处理失败: {e}")
 
-    @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent) -> None:
-        """Bot 发图后：若检测到生图结果图片，则补发一条识图结果。"""
-        try:
-            try:
-                message_types = [
-                    type(comp).__name__ for comp in (event.get_messages() or [])
-                ]
-            except Exception:
-                message_types = []
-            logger.info(
-                f"[ImageGenResult] after_message_sent 已触发: "
-                f"会话={event.unified_msg_origin}, components={message_types}"
-            )
-            recognition_text = (
-                await self.image_generation_result_handler.process_sent_message(event)
-            )
-            if not recognition_text:
-                logger.info(
-                    f"[ImageGenResult] after_message_sent 未识别到需要补发的生图结果: "
-                    f"会话={event.unified_msg_origin}"
-                )
-                return
 
-            await self.context.send_message(
-                event.unified_msg_origin,
-                MessageChain().message(recognition_text),
-            )
-            logger.info(
-                f"[ImageGenResult] 已补发识图结果，会话: {event.unified_msg_origin}"
-            )
-        except Exception as e:
-            logger.debug(f"[after_message_sent] 生图结果识图补发失败: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")

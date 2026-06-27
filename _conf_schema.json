@@ -502,24 +502,6 @@
                 "hint": "AstrBot Provider 兜底识图调用的 max_tokens，默认 300。",
                 "type": "int",
                 "default": 300
-            },
-            "image_generation_result_hook_enabled": {
-                "description": "启用生图结果自动识图（未实现）",
-                "hint": "开启后，当 astrbot_plugin_image_generation 完成任务并唤醒 AI 时，toolbox 会先对生成图做识图摘要并注入上下文。",
-                "type": "bool",
-                "default": true
-            },
-            "image_generation_result_prompt_template": {
-                "description": "生图结果识图提示词模板",
-                "hint": "可用 {task_id}、{image_index}、{image_count} 占位。留空使用内置模板。",
-                "type": "text",
-                "default": ""
-            },
-            "image_generation_result_max_images": {
-                "description": "单次识图最多处理图片数",
-                "hint": "限制每次生图结果注入时最多识别多少张图片，建议 1-3。",
-                "type": "int",
-                "default": 1
             }
         }
     },
