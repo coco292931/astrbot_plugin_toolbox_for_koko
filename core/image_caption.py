@@ -640,6 +640,7 @@ class ImageCaptionHandler:
                 async with sem:
                     caption_tag: str | None = None
                     local_path: str | None = None
+                    resolved_image_type = image_type
                     caption_prompt = prompt
                     try:
                         if kind == "url":
@@ -647,20 +648,20 @@ class ImageCaptionHandler:
                                 provider,
                                 raw_value,
                                 caption_prompt,
-                                image_type,
+                                resolved_image_type,
                             )
                         elif kind == "path":
                             local_path = self._resolve_local_path(raw_value)
                             if not local_path:
-                                caption_tag = f"[{image_type}]"
+                                caption_tag = f"[{resolved_image_type}]"
                             else:
-                                image_type = self._detect_image_type(
+                                resolved_image_type = self._detect_image_type(
                                     source_text=raw_value,
                                     local_path=local_path,
                                 )
                                 caption_prompt = self._build_caption_prompt(
                                     prompt_template,
-                                    image_type=image_type,
+                                    image_type=resolved_image_type,
                                     index=index,
                                     total=total,
                                     source=source_label,
@@ -669,21 +670,21 @@ class ImageCaptionHandler:
                                     provider,
                                     local_path,
                                     caption_prompt,
-                                    image_type,
+                                    resolved_image_type,
                                 )
                         elif kind in {"b64", "data_url"}:
                             decoded = self._decode_base64_image(raw_value)
                             if not decoded:
-                                caption_tag = f"[{image_type}]"
+                                caption_tag = f"[{resolved_image_type}]"
                             else:
                                 data, mime_type = decoded
-                                image_type = self._detect_image_type(
+                                resolved_image_type = self._detect_image_type(
                                     source_text=raw_value[:32],
                                     mime_type=mime_type,
                                 )
                                 caption_prompt = self._build_caption_prompt(
                                     prompt_template,
-                                    image_type=image_type,
+                                    image_type=resolved_image_type,
                                     index=index,
                                     total=total,
                                     source=f"{kind}:{index}",
@@ -695,7 +696,7 @@ class ImageCaptionHandler:
                                     provider,
                                     local_path,
                                     caption_prompt,
-                                    image_type,
+                                    resolved_image_type,
                                 )
                     except Exception as e:
                         logger.debug(f"[ImageCaption] 手动转述失败(kind={kind}): {e}")
@@ -705,13 +706,13 @@ class ImageCaptionHandler:
                                 raw_value
                                 if kind == "url"
                                 else (local_path or raw_value),
-                                image_type,
+                                resolved_image_type,
                                 prompt=caption_prompt,
                                 local_path=local_path,
                             )
 
                     if not caption_tag:
-                        caption_tag = f"[{image_type}]"
+                        caption_tag = f"[{resolved_image_type}]"
                     return f"{index}. {caption_tag}"
 
             try:
