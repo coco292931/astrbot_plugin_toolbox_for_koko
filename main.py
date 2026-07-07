@@ -47,6 +47,7 @@ from .tools.local_memory import (
 from .tools.send_msg import run_send_message
 from .tools.calendar import run_get_calendar
 
+
 @register(
     "astrbot_plugin_toolbox_for_koko",
     "coco",
@@ -248,6 +249,19 @@ class ToolboxPlugin(Star):
             300,
             32,
             4096,
+        )
+
+        self.image_caption_concurrency = self._safe_int(
+            self.config.get("image_caption_concurrency", 3),
+            3,
+            1,
+            10,
+        )
+        self.image_caption_timeout = self._safe_int(
+            self.config.get("image_caption_timeout", 120),
+            120,
+            15,
+            600,
         )
 
         self.image_caption_handler = ImageCaptionHandler(self)
@@ -2444,8 +2458,6 @@ class ToolboxPlugin(Star):
                 )
         except Exception as e:
             logger.debug(f"[on_llm_response] 处理失败: {e}")
-
-
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")

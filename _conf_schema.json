@@ -502,6 +502,28 @@
                 "hint": "AstrBot Provider 兜底识图调用的 max_tokens，默认 300。",
                 "type": "int",
                 "default": 300
+            },
+            "image_caption_concurrency": {
+                "description": "图片转述并发数",
+                "hint": "同时并发转述的最大图片数。设为 1 关闭并发。建议 2-5。",
+                "type": "int",
+                "default": 3,
+                "slider": {
+                    "min": 1,
+                    "max": 10,
+                    "step": 1
+                }
+            },
+            "image_caption_timeout": {
+                "description": "每张图片转述超时时间（秒）",
+                "hint": "单张图片的 URL 直传转述和下载降级转述的合计超时时间。超时后跳过该图片，不影响后续图片。默认 120 秒。",
+                "type": "int",
+                "default": 120,
+                "slider": {
+                    "min": 15,
+                    "max": 600,
+                    "step": 5
+                }
             }
         }
     },

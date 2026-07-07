@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -84,6 +85,18 @@ class ImageCaptionHandler:
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._install_astrbot_caption_error_patch()
+        self._semaphore: asyncio.Semaphore | None = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """懒加载并返回信号量，根据配置的并发数控制同时转述的图片数。"""
+        if self._semaphore is None:
+            limit = getattr(self.plugin, "image_caption_concurrency", 3)
+            self._semaphore = asyncio.Semaphore(max(1, int(limit)))
+        return self._semaphore
+
+    def _get_timeout(self) -> int:
+        """从插件配置读取单张图片转述超时时间（秒）。"""
+        return max(15, int(getattr(self.plugin, "image_caption_timeout", 120) or 120))
 
     def _install_astrbot_caption_error_patch(self) -> None:
         """运行时 patch AstrBot，把原始图片转述异常透传到 request。"""
@@ -473,15 +486,22 @@ class ImageCaptionHandler:
         prompt: str,
         img_type: str,
     ) -> str | None:
-        caption = await provider.text_chat(
-            prompt=prompt,
-            image_urls=[local_path],
-            persist=False,
-        )
-        if caption and caption.completion_text:
-            text = caption.completion_text.strip()
-            logger.info(f"[ImageCaption] 降级转述成功: {img_type}")
-            return f"[{img_type}: {text}]"
+        timeout = self._get_timeout()
+        try:
+            caption = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    image_urls=[local_path],
+                    persist=False,
+                ),
+                timeout=timeout,
+            )
+            if caption and caption.completion_text:
+                text = caption.completion_text.strip()
+                logger.info(f"[ImageCaption] 降级转述成功: {img_type}")
+                return f"[{img_type}: {text}]"
+        except asyncio.TimeoutError:
+            logger.warning(f"[ImageCaption] 降级转述超时 ({timeout}s): {img_type}")
         return None
 
     async def _try_sensitive_fallback_models(
@@ -529,6 +549,8 @@ class ImageCaptionHandler:
             or 300
         )
 
+        fallback_timeout = self._get_timeout()
+
         for provider_id in provider_ids:
             provider = self.plugin.context.get_provider_by_id(provider_id)
             if not provider:
@@ -537,11 +559,14 @@ class ImageCaptionHandler:
                 )
                 continue
             try:
-                caption = await provider.text_chat(
-                    prompt=resolved_prompt,
-                    image_urls=[prepared_local_path],
-                    persist=False,
-                    max_tokens=max_tokens,
+                caption = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=resolved_prompt,
+                        image_urls=[prepared_local_path],
+                        persist=False,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=fallback_timeout,
                 )
                 if not caption or not getattr(caption, "completion_text", ""):
                     logger.debug(
@@ -553,6 +578,11 @@ class ImageCaptionHandler:
                     f"[ImageCaption] 敏感兜底 Provider {provider_id} 转述成功: {img_type}"
                 )
                 return f"[{img_type}: {text}]"
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[ImageCaption] 敏感兜底 Provider {provider_id} 调用超时 "
+                    f"({fallback_timeout}s)"
+                )
             except Exception as e:
                 logger.debug(
                     f"[ImageCaption] 敏感兜底 Provider {provider_id} 调用异常: {e}"
@@ -589,9 +619,11 @@ class ImageCaptionHandler:
         if not prompt_template:
             prompt_template = self.DEFAULT_PROMPT_TEMPLATE
 
-        lines: list[str] = []
-        total = len(entries)
-        for index, entry in enumerate(entries, start=1):
+        sem = self._get_semaphore()
+        timeout = self._get_timeout()
+
+        async def _process_one(index: int, entry: dict[str, str]) -> str:
+            """并发处理单张图片转述，带超时控制。"""
             kind = entry["kind"]
             raw_value = entry["value"]
             source_label = raw_value[:120]
@@ -604,78 +636,97 @@ class ImageCaptionHandler:
                 source=source_label,
             )
 
-            caption_tag: str | None = None
-            local_path: str | None = None
+            async def _do_caption() -> str:
+                async with sem:
+                    caption_tag: str | None = None
+                    local_path: str | None = None
+                    try:
+                        if kind == "url":
+                            caption_tag = await self._transcribe_one(
+                                provider,
+                                raw_value,
+                                prompt,
+                                image_type,
+                            )
+                        elif kind == "path":
+                            local_path = self._resolve_local_path(raw_value)
+                            if not local_path:
+                                caption_tag = f"[{image_type}]"
+                            else:
+                                image_type = self._detect_image_type(
+                                    source_text=raw_value,
+                                    local_path=local_path,
+                                )
+                                prompt = self._build_caption_prompt(
+                                    prompt_template,
+                                    image_type=image_type,
+                                    index=index,
+                                    total=total,
+                                    source=source_label,
+                                )
+                                caption_tag = await self._caption_local_path(
+                                    provider,
+                                    local_path,
+                                    prompt,
+                                    image_type,
+                                )
+                        elif kind in {"b64", "data_url"}:
+                            decoded = self._decode_base64_image(raw_value)
+                            if not decoded:
+                                caption_tag = f"[{image_type}]"
+                            else:
+                                data, mime_type = decoded
+                                image_type = self._detect_image_type(
+                                    source_text=raw_value[:32],
+                                    mime_type=mime_type,
+                                )
+                                prompt = self._build_caption_prompt(
+                                    prompt_template,
+                                    image_type=image_type,
+                                    index=index,
+                                    total=total,
+                                    source=f"{kind}:{index}",
+                                )
+                                local_path = await self._write_temp_image_bytes(
+                                    data, mime_type
+                                )
+                                caption_tag = await self._caption_local_path(
+                                    provider,
+                                    local_path,
+                                    prompt,
+                                    image_type,
+                                )
+                    except Exception as e:
+                        logger.debug(f"[ImageCaption] 手动转述失败(kind={kind}): {e}")
+                        failure_text = str(e)
+                        if self._should_try_sensitive_fallback(failure_text):
+                            caption_tag = await self._try_sensitive_fallback_models(
+                                raw_value
+                                if kind == "url"
+                                else (local_path or raw_value),
+                                image_type,
+                                prompt=prompt,
+                                local_path=local_path,
+                            )
+
+                    if not caption_tag:
+                        caption_tag = f"[{image_type}]"
+                    return f"{index}. {caption_tag}"
+
             try:
-                if kind == "url":
-                    caption_tag = await self._transcribe_one(
-                        provider,
-                        raw_value,
-                        prompt,
-                        image_type,
-                    )
-                elif kind == "path":
-                    local_path = self._resolve_local_path(raw_value)
-                    if not local_path:
-                        caption_tag = f"[{image_type}]"
-                    else:
-                        image_type = self._detect_image_type(
-                            source_text=raw_value,
-                            local_path=local_path,
-                        )
-                        prompt = self._build_caption_prompt(
-                            prompt_template,
-                            image_type=image_type,
-                            index=index,
-                            total=total,
-                            source=source_label,
-                        )
-                        caption_tag = await self._caption_local_path(
-                            provider,
-                            local_path,
-                            prompt,
-                            image_type,
-                        )
-                elif kind in {"b64", "data_url"}:
-                    decoded = self._decode_base64_image(raw_value)
-                    if not decoded:
-                        caption_tag = f"[{image_type}]"
-                    else:
-                        data, mime_type = decoded
-                        image_type = self._detect_image_type(
-                            source_text=raw_value[:32],
-                            mime_type=mime_type,
-                        )
-                        prompt = self._build_caption_prompt(
-                            prompt_template,
-                            image_type=image_type,
-                            index=index,
-                            total=total,
-                            source=f"{kind}:{index}",
-                        )
-                        local_path = await self._write_temp_image_bytes(data, mime_type)
-                        caption_tag = await self._caption_local_path(
-                            provider,
-                            local_path,
-                            prompt,
-                            image_type,
-                        )
-            except Exception as e:
-                logger.debug(f"[ImageCaption] 手动转述失败(kind={kind}): {e}")
-                failure_text = str(e)
-                if self._should_try_sensitive_fallback(failure_text):
-                    caption_tag = await self._try_sensitive_fallback_models(
-                        raw_value if kind == "url" else (local_path or raw_value),
-                        image_type,
-                        prompt=prompt,
-                        local_path=local_path,
-                    )
+                return await asyncio.wait_for(_do_caption(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[ImageCaption] 手动转述超时 ({timeout}s): "
+                    f"kind={kind}, value={raw_value[:80]}"
+                )
+                return f"{index}. [{image_type}]"
 
-            if not caption_tag:
-                caption_tag = f"[{image_type}]"
-            lines.append(f"{index}. {caption_tag}")
+        total = len(entries)
+        tasks = [_process_one(idx, entry) for idx, entry in enumerate(entries, start=1)]
+        results = await asyncio.gather(*tasks)
 
-        return "\n".join(lines)
+        return "\n".join(results)
 
     def _get_compress_config(self) -> tuple[bool, int, int]:
         """从 AstrBot 配置读取图片压缩参数。"""
@@ -762,52 +813,60 @@ class ImageCaptionHandler:
             logger.warning("[ImageCaption] 未找到可用图片转述 Provider，跳过降级")
             return
 
-        for img_url, img_type in image_infos:
-            # 构建提示词
-            prompt_template = self.plugin.image_caption_prompt_template
+        # 解析提示词模板
+        prompt_template = self.plugin.image_caption_prompt_template
+        ctx = self.plugin.context
+        try:
+            cfg = ctx.get_config()
+            astrbot_image_caption_prompt = cfg.get("provider_settings", {}).get(
+                "image_caption_prompt", ""
+            )
+        except Exception:
+            astrbot_image_caption_prompt = ""
 
-            # 捕获 AstrBot 配置中的图片转述提示词（如果有的话），优先级低于插件配置
-            ctx = self.plugin.context
-            try:
-                cfg = ctx.get_config()
-                astrbot_image_caption_prompt = cfg.get("provider_settings", {}).get(
-                    "image_caption_prompt", ""
-                )
-            except Exception:
-                astrbot_image_caption_prompt = ""
+        if not prompt_template:
+            if not astrbot_image_caption_prompt:
+                prompt_template = self.DEFAULT_PROMPT_TEMPLATE
+            else:
+                prompt_template = astrbot_image_caption_prompt
 
-            if not prompt_template:
-                if not astrbot_image_caption_prompt:
-                    prompt_template = self.DEFAULT_PROMPT_TEMPLATE
-                else:
-                    prompt_template = astrbot_image_caption_prompt
+        # 并发处理每张图片
+        sem = self._get_semaphore()
 
-            try:
-                caption_prompt = prompt_template.format(image_type=img_type)
-            except KeyError:
-                caption_prompt = self.DEFAULT_PROMPT_TEMPLATE.format(
-                    image_type=img_type
-                )
+        async def _process_one(img_url: str, img_type: str) -> str:
+            """并发处理单张图片转述。"""
+            async with sem:
+                try:
+                    caption_prompt = prompt_template.format(image_type=img_type)
+                except KeyError:
+                    caption_prompt = self.DEFAULT_PROMPT_TEMPLATE.format(
+                        image_type=img_type
+                    )
 
-            caption_tag = None
-            if try_sensitive_fallback:
-                caption_tag = await self._try_sensitive_fallback_models(
-                    img_url,
-                    img_type,
-                )
+                caption_tag: str | None = None
+                if try_sensitive_fallback:
+                    caption_tag = await self._try_sensitive_fallback_models(
+                        img_url,
+                        img_type,
+                    )
 
-            if not caption_tag and provider:
-                caption_tag = await self._transcribe_one(
-                    provider,
-                    img_url,
-                    caption_prompt,
-                    img_type,
-                    skip_direct_url_retry=skip_direct_url_retry,
-                )
-            if not caption_tag:
-                caption_tag = f"[{img_type}]"
+                if not caption_tag and provider:
+                    caption_tag = await self._transcribe_one_with_timeout(
+                        provider,
+                        img_url,
+                        caption_prompt,
+                        img_type,
+                        skip_direct_url_retry=skip_direct_url_retry,
+                    )
+                if not caption_tag:
+                    caption_tag = f"[{img_type}]"
+                return caption_tag
 
-            # 追加转述结果
+        tasks = [_process_one(url, itype) for url, itype in image_infos]
+        results = await asyncio.gather(*tasks)
+
+        # 按顺序追加转述结果
+        for caption_tag in results:
             if hasattr(request, "extra_user_content_parts"):
                 request.extra_user_content_parts.append(TextPart(text=caption_tag))
 
@@ -838,6 +897,34 @@ class ImageCaptionHandler:
         except Exception:
             pass
         return None
+
+    async def _transcribe_one_with_timeout(
+        self,
+        provider: Any,
+        img_url: str,
+        prompt: str,
+        img_type: str,
+        skip_direct_url_retry: bool = False,
+    ) -> str:
+        """带超时控制的单张图片转述。"""
+        timeout = self._get_timeout()
+        try:
+            result = await asyncio.wait_for(
+                self._transcribe_one(
+                    provider=provider,
+                    img_url=img_url,
+                    prompt=prompt,
+                    img_type=img_type,
+                    skip_direct_url_retry=skip_direct_url_retry,
+                ),
+                timeout=timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[ImageCaption] 转述超时 ({timeout}s): {img_type} - {img_url[:80]}"
+            )
+            return f"[{img_type}]"
 
     async def _transcribe_one(
         self,
