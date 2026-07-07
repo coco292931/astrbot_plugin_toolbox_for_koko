@@ -640,12 +640,13 @@ class ImageCaptionHandler:
                 async with sem:
                     caption_tag: str | None = None
                     local_path: str | None = None
+                    caption_prompt = prompt
                     try:
                         if kind == "url":
                             caption_tag = await self._transcribe_one(
                                 provider,
                                 raw_value,
-                                prompt,
+                                caption_prompt,
                                 image_type,
                             )
                         elif kind == "path":
@@ -657,7 +658,7 @@ class ImageCaptionHandler:
                                     source_text=raw_value,
                                     local_path=local_path,
                                 )
-                                prompt = self._build_caption_prompt(
+                                caption_prompt = self._build_caption_prompt(
                                     prompt_template,
                                     image_type=image_type,
                                     index=index,
@@ -667,7 +668,7 @@ class ImageCaptionHandler:
                                 caption_tag = await self._caption_local_path(
                                     provider,
                                     local_path,
-                                    prompt,
+                                    caption_prompt,
                                     image_type,
                                 )
                         elif kind in {"b64", "data_url"}:
@@ -680,7 +681,7 @@ class ImageCaptionHandler:
                                     source_text=raw_value[:32],
                                     mime_type=mime_type,
                                 )
-                                prompt = self._build_caption_prompt(
+                                caption_prompt = self._build_caption_prompt(
                                     prompt_template,
                                     image_type=image_type,
                                     index=index,
@@ -693,7 +694,7 @@ class ImageCaptionHandler:
                                 caption_tag = await self._caption_local_path(
                                     provider,
                                     local_path,
-                                    prompt,
+                                    caption_prompt,
                                     image_type,
                                 )
                     except Exception as e:
@@ -705,7 +706,7 @@ class ImageCaptionHandler:
                                 if kind == "url"
                                 else (local_path or raw_value),
                                 image_type,
-                                prompt=prompt,
+                                prompt=caption_prompt,
                                 local_path=local_path,
                             )
 
