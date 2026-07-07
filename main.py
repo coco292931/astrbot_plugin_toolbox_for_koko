@@ -2085,6 +2085,9 @@ class ToolboxPlugin(Star):
             "provider_id": provider_id,
         }
         message = await self.image_caption_handler.caption_tool(event, args)
+        message = json.dumps(message, ensure_ascii=False)
+        if message.startswith('"') and message.endswith('"'):
+            message = message[1:-1]
         return {"status": "success", "message": message}
 
     @llm_tool("run_koko_tool")
