@@ -510,6 +510,35 @@ class ImageCaptionHandler:
                 local_path = frame_path
         return local_path
 
+    async def _prepare_local_image_file(self, local_path: str) -> str:
+        """对已在本地的图片做帧提取和压缩，返回可直接传给 provider 的路径。
+
+        与 _prepare_local_image_path 的区别：跳过下载步骤，直接处理本地文件。
+        主要用于 4.26+ PreProcessStage 已将 Image.url 改写为本地路径的场景。
+        """
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from PIL import Image as PILImage
+
+        compress_enabled, max_size, quality = self._get_compress_config()
+        if compress_enabled:
+            local_path = await compress_image(
+                local_path,
+                max_size=max_size,
+                quality=quality,
+            )
+
+        with PILImage.open(local_path) as pil_img:
+            if getattr(pil_img, "is_animated", False):
+                pil_img.seek(0)
+                frame = pil_img.convert("RGB")
+                frame_path = os.path.join(
+                    get_astrbot_temp_path(),
+                    f"kc_img_{uuid.uuid4()}.jpg",
+                )
+                frame.save(frame_path, "JPEG", quality=quality)
+                local_path = frame_path
+        return local_path
+
     async def _caption_local_path(
         self,
         provider: Any,
@@ -533,6 +562,8 @@ class ImageCaptionHandler:
                 return f"[{img_type}: {text}]"
         except asyncio.TimeoutError:
             logger.warning(f"[ImageCaption] 降级转述超时 ({timeout}s): {img_type}")
+        except Exception as e:
+            logger.debug(f"[ImageCaption] 降级转述失败: {e}")
         return None
 
     async def _try_sensitive_fallback_models(
@@ -910,11 +941,16 @@ class ImageCaptionHandler:
 
                 if not caption_tag and provider:
                     if kind == "path":
-                        # 4.26+：img_value 已是本地路径，直接转述，无需下载
-                        local_path = self._resolve_local_path(img_value) or img_value
+                        # 4.26+：img_value 已是本地路径，先做帧提取/压缩再转述
+                        resolved = self._resolve_local_path(img_value) or img_value
+                        try:
+                            prepared = await self._prepare_local_image_file(resolved)
+                        except Exception as e:
+                            logger.debug(f"[ImageCaption] 本地图片预处理失败: {e}")
+                            prepared = resolved
                         caption_tag = await self._caption_local_path(
                             provider,
-                            local_path,
+                            prepared,
                             caption_prompt,
                             img_type,
                         )
