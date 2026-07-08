@@ -249,6 +249,16 @@ class ImageCaptionHandler:
             return []
         return [str(v).strip() for v in provider_ids if str(v).strip()]
 
+    @staticmethod
+    def _is_successful_caption(caption_tag: str) -> bool:
+        """判断 _transcribe_one 返回的标记是否为成功转述。
+
+        成功格式: "[图片类型: 描述]"  (包含冒号)
+        失败格式: "[图片类型]"          (无冒号，纯占位符)
+        """
+        text = str(caption_tag or "").strip()
+        return ":" in text
+
     def _normalize_string_items(self, raw: Any) -> list[str]:
         if raw is None:
             return []
@@ -650,6 +660,24 @@ class ImageCaptionHandler:
                                 caption_prompt,
                                 resolved_image_type,
                             )
+                            # _transcribe_one 内部会吞掉所有异常并以失败标记返回，
+                            # 导致外层的 except Exception 永远无法被 url 分支触发。
+                            # 这里需要主动检查返回结果是否为失败标记，以触发敏感兜底。
+                            if not caption_tag or not self._is_successful_caption(
+                                caption_tag
+                            ):
+                                logger.debug(
+                                    f"[ImageCaption] URL转述返回失败标记: {caption_tag}"
+                                )
+                                fallback_result = (
+                                    await self._try_sensitive_fallback_models(
+                                        raw_value,
+                                        resolved_image_type,
+                                        prompt=caption_prompt,
+                                    )
+                                )
+                                if fallback_result:
+                                    caption_tag = fallback_result
                         elif kind == "path":
                             local_path = self._resolve_local_path(raw_value)
                             if not local_path:
