@@ -412,8 +412,15 @@ class ImageCaptionHandler:
             f.write(data)
         return path
 
-    def _collect_event_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        image_urls: list[str] = []
+    def _collect_event_image_entries(
+        self, event: AstrMessageEvent
+    ) -> list[dict[str, str]]:
+        """从事件消息链中提取图片，自动识别本地路径与远程 URL。
+
+        4.26 起 PreProcessStage 会把 Image.url 改写为本地路径，
+        因此不能再无脑当作 URL 传给 provider，需要区分 kind。
+        """
+        entries: list[dict[str, str]] = []
         try:
             messages = event.get_messages() or []
         except Exception:
@@ -421,9 +428,23 @@ class ImageCaptionHandler:
         for comp in messages:
             if isinstance(comp, MsgImage):
                 candidate = str(comp.url or comp.file or "").strip()
-                if candidate:
-                    image_urls.append(candidate)
-        return image_urls
+                if not candidate:
+                    continue
+                # 4.26+ PreProcessStage 会将 url 改写为本地绝对路径
+                if self._is_network_url(candidate):
+                    entries.append({"kind": "url", "value": candidate})
+                else:
+                    # 本地路径（含 file:// URI）
+                    entries.append({"kind": "path", "value": candidate})
+        return entries
+
+    def _collect_event_image_urls(self, event: AstrMessageEvent) -> list[str]:
+        """兼容旧调用，仅返回远程 URL（本地路径被丢弃）。"""
+        return [
+            e["value"]
+            for e in self._collect_event_image_entries(event)
+            if e["kind"] == "url"
+        ]
 
     async def _normalize_tool_image_entries(
         self,
@@ -448,8 +469,8 @@ class ImageCaptionHandler:
             add_entry("data_url", item)
 
         if not entries and bool(args.get("use_event_images", True)):
-            for item in self._collect_event_image_urls(event):
-                add_entry("url", item)
+            for entry in self._collect_event_image_entries(event):
+                entries.append(entry)
 
         normalized: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
@@ -805,15 +826,16 @@ class ImageCaptionHandler:
         if try_sensitive_fallback:
             logger.info("[ImageCaption] 命中敏感内容错误，尝试自定义兜底模型")
 
-        # 从原始消息提取图片 URL 和类型
-        image_infos: list[tuple[str, str]] = []
+        # 从原始消息提取图片，4.26 起 url 可能已是本地路径
+        image_infos: list[tuple[str, str, str]] = []  # (kind, value, img_type)
         for comp in event.get_messages():
             if isinstance(comp, MsgImage):
-                url = comp.url if comp.url else comp.file
-                if url:
-                    # sub_type 保留供后续扩展，当前一律按 GIF 处理
-                    # sub_type = getattr(comp, "sub_type", None)
-                    image_infos.append((url, "GIF"))
+                candidate = str(comp.url or comp.file or "").strip()
+                if not candidate:
+                    continue
+                kind = "url" if self._is_network_url(candidate) else "path"
+                # sub_type 保留供后续扩展，当前一律按 GIF 处理
+                image_infos.append((kind, candidate, "GIF"))
 
         if not image_infos:
             return
@@ -863,8 +885,12 @@ class ImageCaptionHandler:
         # 并发处理每张图片
         sem = self._get_semaphore()
 
-        async def _process_one(img_url: str, img_type: str) -> str:
-            """并发处理单张图片转述。"""
+        async def _process_one(kind: str, img_value: str, img_type: str) -> str:
+            """并发处理单张图片转述。
+
+            4.26 起 kind 可能为 'path'（本地文件），需要直接走 _caption_local_path，
+            而非 _transcribe_one_with_timeout（后者先走 URL 直传再降级下载）。
+            """
             async with sem:
                 try:
                     caption_prompt = prompt_template.format(image_type=img_type)
@@ -874,25 +900,38 @@ class ImageCaptionHandler:
                     )
 
                 caption_tag: str | None = None
+
                 if try_sensitive_fallback:
                     caption_tag = await self._try_sensitive_fallback_models(
-                        img_url,
+                        img_value,
                         img_type,
+                        local_path=img_value if kind == "path" else None,
                     )
 
                 if not caption_tag and provider:
-                    caption_tag = await self._transcribe_one_with_timeout(
-                        provider,
-                        img_url,
-                        caption_prompt,
-                        img_type,
-                        skip_direct_url_retry=skip_direct_url_retry,
-                    )
+                    if kind == "path":
+                        # 4.26+：img_value 已是本地路径，直接转述，无需下载
+                        local_path = self._resolve_local_path(img_value) or img_value
+                        caption_tag = await self._caption_local_path(
+                            provider,
+                            local_path,
+                            caption_prompt,
+                            img_type,
+                        )
+                    else:
+                        caption_tag = await self._transcribe_one_with_timeout(
+                            provider,
+                            img_value,
+                            caption_prompt,
+                            img_type,
+                            skip_direct_url_retry=skip_direct_url_retry,
+                        )
+
                 if not caption_tag:
                     caption_tag = f"[{img_type}]"
                 return caption_tag
 
-        tasks = [_process_one(url, itype) for url, itype in image_infos]
+        tasks = [_process_one(kind, val, itype) for kind, val, itype in image_infos]
         results = await asyncio.gather(*tasks)
 
         # 按顺序追加转述结果
