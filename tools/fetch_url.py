@@ -322,6 +322,7 @@ async def _get_from_url(
     url: str,
     use_legacy: bool = False,
     llm_compress: str = "inherit",
+    use_proxy: bool = False,
 ) -> str:
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -346,7 +347,11 @@ async def _get_from_url(
         current_url = url
         html = ""
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        proxy = None
+        if use_proxy:
+            proxy = getattr(plugin, "fetch_url_proxy", "") or None
+
+        async with aiohttp.ClientSession(timeout=timeout, proxy=proxy) as session:
             for _ in range(max_redirects + 1):
                 ok, normalized_url, err = await _normalize_and_validate_fetch_url(
                     plugin, current_url
@@ -445,6 +450,12 @@ async def handle_fetch_url(plugin, args: dict) -> str:
         if llm_compress is None:
             return "llm_compress 参数无效：仅支持 inherit、summary、truncate。"
 
+    use_proxy = False
+    if hasattr(plugin, "_safe_bool"):
+        use_proxy = plugin._safe_bool(args.get("use_proxy", False), False)
+    else:
+        use_proxy = bool(args.get("use_proxy", False))
+
     ok, normalized_url, err = await _normalize_and_validate_fetch_url(plugin, url)
     if not ok:
         return err
@@ -454,6 +465,7 @@ async def handle_fetch_url(plugin, args: dict) -> str:
         normalized_url,
         use_legacy=skip_filter,
         llm_compress=llm_compress,
+        use_proxy=use_proxy,
     )
 
 

@@ -295,6 +295,9 @@ class ToolboxPlugin(Star):
         self.fetch_url_blocked_targets = self._parse_blocked_targets(
             self.config.get("fetch_url_blocked_targets", [])
         )
+        self.fetch_url_proxy = str(
+            self.config.get("fetch_url_proxy", "") or ""
+        ).strip()
         # 默认放宽到 6MB，并允许按配置上调（上限 30MB），提升长文抓取成功率。
         self.fetch_url_max_download_bytes = self._safe_int(
             self.config.get("fetch_url_max_download_bytes", 6 * 1024 * 1024),
@@ -956,6 +959,10 @@ class ToolboxPlugin(Star):
                             "type": "string",
                             "enum": ["inherit", "summary", "truncate"],
                             "description": "可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。",
+                        },
+                        "use_proxy": {
+                            "type": "boolean",
+                            "description": "可选：true=通过配置的 fetch_url_proxy 代理抓取（适合被墙站点）；false(默认)=直连。",
                         },
                     },
                     "required": ["url"],

@@ -106,6 +106,12 @@
                 },
                 "default": []
             },
+            "fetch_url_proxy": {
+                "description": "网页抓取代理地址",
+                "hint": "留空=直连；填写如 http://127.0.0.1:7890 后，工具 use_proxy=true 时走该代理抓取（适合被墙站点）。",
+                "type": "string",
+                "default": ""
+            },
             "fetch_url_max_redirects": {
                 "description": "网页重定向次数上限",
                 "hint": "最大跟随重定向次数，建议 0-10。",
