@@ -1,5 +1,17 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.6.13] - 2026-08-29
+
+### ✨ 新增
+
+- **fetch_url 代理支持**：新增配置项 `fetch_url_proxy`（代理地址，如 `http://127.0.0.1:7890`）+ 工具参数 `use_proxy`（true=走代理抓取，适合被墙站点如 e-hentai）。工具入口 `koko_fetch_url`/`fetch_website_content` 均已支持。
+
+### 🐛 修复
+
+- **fetch_url 域名校验 IPv6 误判**：解析出 IPv6 保留段（如 Teredo `2001::/32`）被 `is_private` 误判为私网导致正常站点被拒（e-hentai.org 实测踩坑）。改为"优先放行公网 IPv4；无公网 IPv4 时才逐条检查"，私网/回环/本地拦截逻辑保持不变。
+
+# 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
+
 ## [1.6.0] - 2026-06-13
 
 ### ✨ 新增
