@@ -2187,14 +2187,13 @@ class ToolboxPlugin(Star):
         llm_compress: str = "inherit",
         use_proxy: bool = False,
     ) -> str:
-        """Fetch the content of a website with the given web url.
+        """抓取单个网页正文文本，适合对指定 URL 做内容提取。
 
         Args:
-            url(string): The url of the website to fetch content from
-            skip_filter(boolean): 开关：false(默认)=增强抓取逻辑；true=原版 fetch_url 逻辑。
-            llm_compress(string): 可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。
-            use_proxy(boolean): 可选：true=通过配置的 fetch_url_proxy 代理抓取（适合被墙站点）；false(默认)=直连。
-
+            url(string): 网页URL，必须以 http:// 或 https:// 开头
+            skip_filter(boolean): false(默认)=增强抓取逻辑，true=原版逻辑
+            llm_compress(string): inherit=按用户配置(默认)，summary=超长时LLM压缩，truncate=超长时截断
+            use_proxy(boolean): true=通过配置的 fetch_url_proxy 代理抓取，false(默认)=直连
         """
         if not self.enable_fetch_url:
             return "网页抓取功能已被禁用。"
