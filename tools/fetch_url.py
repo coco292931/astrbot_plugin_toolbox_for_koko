@@ -239,9 +239,23 @@ async def _validate_fetch_url(plugin, url: str) -> tuple[bool, str]:
         infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
         if not infos:
             return False, "无法解析目标域名。"
+        # 优先放行：只要解析出公网 IPv4 就允许访问，
+        # 避免个别 IPv6 保留段（如 Teredo）被 is_private 误判而误杀正常站点
+        has_public_v4 = False
         for info in infos:
-            sockaddr = info[4]
-            resolved_ip = sockaddr[0]
+            resolved_ip = info[4][0]
+            try:
+                ip = ipaddress.ip_address(resolved_ip)
+            except ValueError:
+                continue
+            if ip.version == 4 and not _bad_ip(resolved_ip):
+                has_public_v4 = True
+                break
+        if has_public_v4:
+            return True, ""
+        # 无公网 IPv4 时，逐条检查（仍拦截私网/回环/保留等）
+        for info in infos:
+            resolved_ip = info[4][0]
             if _bad_ip(resolved_ip):
                 return False, "目标地址已被管理员禁止访问。"
     except Exception:
