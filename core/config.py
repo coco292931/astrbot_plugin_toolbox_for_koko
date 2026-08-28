@@ -86,6 +86,7 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             "fetch_url_summary_prompt",
             "fetch_url_summary_llm_provider_id",
             "fetch_url_max_download_bytes",
+            "fetch_url_proxy",
         ):
             if key in web_fetch_cfg:
                 incoming[key] = web_fetch_cfg.get(key)
