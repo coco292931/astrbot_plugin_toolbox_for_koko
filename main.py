@@ -2185,6 +2185,7 @@ class ToolboxPlugin(Star):
         url: str,
         skip_filter: bool = False,
         llm_compress: str = "inherit",
+        use_proxy: bool = False,
     ) -> str:
         """Fetch the content of a website with the given web url.
 
@@ -2192,6 +2193,7 @@ class ToolboxPlugin(Star):
             url(string): The url of the website to fetch content from
             skip_filter(boolean): 开关：false(默认)=增强抓取逻辑；true=原版 fetch_url 逻辑。
             llm_compress(string): 可选覆盖项：inherit=按用户配置(默认)；summary=超长时强制 LLM 压缩；truncate=超长时强制截断。
+            use_proxy(boolean): 可选：true=通过配置的 fetch_url_proxy 代理抓取（适合被墙站点）；false(默认)=直连。
 
         """
         if not self.enable_fetch_url:
@@ -2208,6 +2210,7 @@ class ToolboxPlugin(Star):
             normalized_url,
             use_legacy=skip_filter,
             llm_compress=llm_compress_mode,
+            use_proxy=use_proxy,
         )
 
     @filter.on_llm_request()
