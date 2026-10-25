@@ -52,7 +52,7 @@ from .tools.calendar import run_get_calendar
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.12",
+    "1.6.14",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
