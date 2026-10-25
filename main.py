@@ -52,7 +52,7 @@ from .tools.calendar import run_get_calendar
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.12",
+    "1.6.14",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -2359,8 +2359,8 @@ class ToolboxPlugin(Star):
                     )
                 if recall_content:
                     recall_block = (
-                        f"<system_WARNING>用户手动触发了人格召回！ 这说明你的回复已经严重背离了人格设定！这是极度危险的行为！\n"
-                        f"请你立刻回顾你的人格设定，认真思考用户召回的原因，并且谨慎做出接下来的回答！\n"
+                        f"<system_WARNING>对方手动触发了人格召回！ 这说明你的回复已经严重背离了人格设定！这是极度危险的行为！\n"
+                        f"请你立刻回顾你的人格设定，认真思考对方召回的原因，并且谨慎做出接下来的回答！\n"
                         f"请严格遵守：\n"
                         f"{recall_content}</system_WARNING>"
                     )

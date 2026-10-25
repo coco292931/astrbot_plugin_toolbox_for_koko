@@ -38,6 +38,8 @@ DEFAULT_AUDIT_PROMPT = (
     "- 矫正规则可以适当放宽，忽略轻微偏移，但若触发重点或禁止性规则，则必须说明。\n"
     "- 前次调整方向仅供参考，若非必要或与审核标准相悖，可以忽略。\n"
     "- 当LLM回复中含有用户设定的触发关键词时，LLM触发关键词不为空。但是数据仅供参考，误判时可以忽略。\n"
+    "- 每一个矫正点请用“1.”、“2.”等序号表示，并在尾部换行\n"
+    "- 校正指示中应当把“用户”称作“对方”。\n"
     "- 校正指示应当简洁、清晰说明 AI 应当如何改进回复，不宜长篇大论。\n"
     "- 矫正指示应当引导AI调整后续回复内容，但避免指出具体错误案例。\n"
     "- 矫正指示应当主要引导LLM的行为，而不是强制或要求其改变行为\n"
@@ -61,8 +63,11 @@ DEFAULT_PERSONA_AUDIT_PROMPT = (
     "输出格式：\n"
     "- 如果AI的回复完全符合所设定人格 → 回复：无需调整\n"
     "- 如果任何方面不符合人格设定 → 回复：调整方向:<简洁、清晰的校正指示>（例如：“建议使用更温柔的语气”“建议增加口语化表达”“建议减少正式用语”）\n"
-    "- 请侧重留意AI的说话方式、语气、用词是否与人格设定一致，内容是否体现或有违了人格特征。\n"
+    "- 请侧重留意AI的说话方式、语气、用词是否与人格设定一致，内容是否体现或有违了人格特征（性格、规则规范遵循等）。\n"
+    "- 不要使用“第x条”这样的表述，给出错误点或直接写出校正指示。\n"
     "- 如果无法判断 → 回复：无法进行审核\n"
+    "- 每一个矫正点请用“1.”、“2.”等序号表示，并在尾部换行\n"
+    "- 校正指示中应当把“用户”称作“对方”。\n"
     "- 如果对话中用户明确要求AI改变风格，则以用户要求为优先。\n\n"
     "[AI人格设定]\n"
     "{persona_prompt}\n\n"
@@ -550,7 +555,7 @@ class ContentAuditLoop:
             self._log_debug(f"[ContentAudit] key={key} 无需调整，跳过注入")
             return
 
-        reminder = f"<system_WARNING>上下文内容已触发对话审核规则，请按照指示调整后续回复：{correction}</system_WARNING>"
+        reminder = f"<system_WARNING>上下文内容已违反对话规则，请认真思考违反的原因，并且谨慎按照指示调整后续回复：{correction}</system_WARNING>"
 
         # 根据 _inject_mode_ca 选择注入位置
         self._do_inject(request, reminder, self._inject_mode_ca, "ContentAudit", key)
@@ -573,7 +578,7 @@ class ContentAuditLoop:
                 async with self._pa_inject_ready_lock:
                     self._pa_inject_ready[key] = True
             elif pa_correction.strip():
-                pa_reminder = f"<system_WARNING>上下文内容已触发人格遵循审核，请按照指示调整后续回复：{pa_correction}</system_WARNING>"
+                pa_reminder = f"<system_WARNING>上下文内容已违反人格遵循审核规则，请认真思考违反的原因，并且按照指示谨慎调整后续回复：{pa_correction}</system_WARNING>"
                 self._do_inject(
                     request, pa_reminder, self._inject_mode_pa, "PersonaAudit", key
                 )
