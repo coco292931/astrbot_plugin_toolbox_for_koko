@@ -207,6 +207,23 @@ def extract_grouped_runtime_config(raw: dict) -> dict:
             if key in calendar_cfg:
                 incoming[key] = calendar_cfg.get(key)
 
+    tool_deadline_cfg = raw.get("tool_deadline", {})
+    if not isinstance(tool_deadline_cfg, dict):
+        tool_deadline_cfg = {}
+    for key in (
+        "tool_deadline_enabled",
+        "tool_deadline_private_only",
+        "tool_deadline_grace_ms",
+        "tool_deadline_wait_tools",
+        "tool_deadline_skip_tools",
+        "tool_deadline_reset_follow_up_seq",
+    ):
+        # 兼容分组结构与扁平结构两种配置形态
+        if key in tool_deadline_cfg:
+            incoming[key] = tool_deadline_cfg.get(key)
+        elif key in raw:
+            incoming[key] = raw.get(key)
+
     if "summary_prompt" in raw:
         incoming["summary_prompt"] = raw.get("summary_prompt")
 

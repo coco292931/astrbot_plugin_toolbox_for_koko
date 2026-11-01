@@ -21,6 +21,7 @@
 - 📤 **主动消息发送**：支持向指定 QQ 好友或群聊发送文本消息。
 - 🎯 **Goal 目标指引**：会话级目标设置，用户与 LLM 均可通过 `/goal` 命令或 `set_goal` 工具设置/清除当前对话的 Goal，自动注入到每次 LLM 请求中引导对话方向。持久化保存，重启后自动恢复。
 - 📅 **iCal 日历查询**：通过 `tool_get_calendar` 工具拉取 Google Calendar 等标准 iCal 日历，返回指定时间范围内的事件列表。支持代理、自定义时区（自动读取 AstrBot 系统时区），零外部依赖。
+- ⏱️ **用户消息交付时限（工具让位）**：把「用户消息 → 下一次 LLM 请求」的等待时间收敛到可配置上限。AstrBot 的 Agent 循环是串行的，用户在工具执行中发来的消息只能等下一次 API 请求才交付。本功能在工具启动时把 `yield_time_ms` 收紧到距截止时刻的剩余量：跑得完就正常返回完整结果，跑不完就干净地转入后台并让报文立刻发出。纯公开钩子实现，不改 AstrBot 核心。
 
 ## 🏗️ 项目架构
 
@@ -38,7 +39,8 @@ astrbot_plugin_toolbox_for_koko/
 │   ├── kc_context.py         # 群聊上下文管理器（KCContextManager）
 │   ├── image_caption.py      # 图片转述前处理器（ImageCaptionHandler）
 │   ├── image_generation_result.py # 生图结果识图注入处理器（ImageGenerationResultHandler）
-│   └── content_audit.py      # 自动内容审核校正器（ContentAuditLoop）
+│   ├── content_audit.py      # 自动内容审核校正器（ContentAuditLoop）
+│   └── tool_deadline.py      # 用户消息交付时限守卫（ToolDeadlineGuard）
 ├── tools/
 │   ├── __init__.py
 │   ├── weather.py            # 天气查询（位置、实时、多日、历史）
@@ -54,6 +56,7 @@ astrbot_plugin_toolbox_for_koko/
 ├── _conf_schema.json         # AstrBot WebUI 配置 schema
 ├── _conf_schema_config.json  # 配置项默认值
 ├── requirements.txt          # 项目依赖
+├── test_tool_deadline.py     # 工具让位自测脚本（python test_tool_deadline.py）
 ├── CHANGELOG.md              # 更新日志
 ```
 
@@ -142,7 +145,7 @@ astrbot_plugin_toolbox_for_koko/
 **LLM 工具 `get_goal`：** 只读工具，返回当前会话已设置的 Goal 内容、注入位置、设定时间和设定者。
 
 **用户命令 `/goal` 也可直接查看当前 Goal：** 不带子命令时返回当前会话的 Goal 状态。
-### � iCal 日历查询 (calendar)
+### 📅 iCal 日历查询 (calendar)
 
 通过标准 iCal URL 拉取日历数据，返回指定时间范围内的事件列表。零外部依赖，内置 iCal 解析器。
 
@@ -153,7 +156,62 @@ astrbot_plugin_toolbox_for_koko/
 
 > `date_from`/`date_to` 优先于 `days_ahead`/`days_back`；不传绝对日期时以相对天数计算范围。
 
-### �📋 自动内容审核校正 (content_audit)
+### ⏱️ 用户消息交付时限 (tool_deadline)
+
+AstrBot 的 Agent 循环是串行的：`API 请求 → 工具批次 → API 请求 → …`。用户在工具执行过程中发来的消息，只会被 follow-up 机制暂存，并**在下一次 API 请求那一刻**随工具返回值交给 LLM。因此消息的实际等待时间 = 在途 API 调用剩余时长 + 在途工具批次剩余时长。
+
+本功能只解决可控的那一半，且**严格区分两种状态**：
+
+| 状态 | 行为 |
+|---|---|
+| **没有消息插入** | `yield_time_ms` **原样透传**，返回值逐字节相同，不额外消耗任何 LLM 轮次 |
+| **工具执行期间有消息插入** | 消息到达的**那一刻**命令转入后台，Agent 立刻发出下一次 API 请求 |
+| 消息在工具启动前就在等 | 以 `yield_time_ms=0` 启动，直接返回真实 `session_id` |
+
+实现方式：拦截托管会话类工具的 `call`，把一次长等待拆成「启动 + 可中断的等待」——原生调用与消息信号竞速，原生先完成就原样返回，消息先到就取消「等待」（**不杀进程**，会话仍可 `poll` 续查）。
+
+「待交付」信号必须在下一次 API 请求发出时清除，否则它会一直置位，导致同一轮里之后每个工具都被强制 `yield_time_ms=0`、模型只能反复轮询。AstrBot 的 `OnLLMRequestEvent` **每次 Agent 运行只触发一次**（runner 开始逐步执行之前），覆盖不到后续 step，因此插件会在活跃 runner 的 `step()` 上挂一个清除钩子——`step()` 与 API 请求一一对应，是精确的交付边界。该钩子挂在 runner 实例上，随其生命周期自然回收。
+
+- **tool_deadline_enabled**: 总开关，默认开启。关闭后完全不介入，连补丁都不打。
+- **tool_deadline_private_only**: 仅私聊生效，默认开启。群聊中他人消息不受 follow-up 捕获，保持原生行为。
+- **tool_deadline_grace_ms**: 让位宽限（毫秒），默认 `0`。默认消息一到立刻让位；设为正数可让「马上跑完」的命令自然收尾，代价是交付延迟最多增加该值。
+- **tool_deadline_wait_tools**: 拦截工具白名单（类名）。留空自动识别 `LocalExecuteShellTool` 与 `ShellSessionTool`。
+- **tool_deadline_skip_tools**: 黑名单，优先级高于白名单。
+- **tool_deadline_reset_follow_up_seq**: 清理残留的 follow-up 序号，默认开启。见下方说明。
+
+**适用范围与兜底**
+
+- 只拦截**托管会话类**工具（`LocalExecuteShellTool`、`ShellSessionTool`）：它们是唯一能"转后台并续查"的工具。
+- 沙箱版 `astrbot_execute_shell`（`ExecuteShellTool`）、MCP 工具、业务工具完全不碰。
+- 工具类在运行时从 `ProviderRequest.func_tool` 中发现，不硬编码 AstrBot 内部模块路径。
+- AstrBot 4.22.0 及更早版本没有托管会话机制，本功能自动退化为空操作，不影响插件加载。
+- 后台唤醒/定时任务事件（platform 为 `cron`）一律跳过。
+- 插件卸载（`terminate`）会还原原始方法，避免热重载后叠加多层包装。
+- 任何异常都退回原生实现，绝不因为本功能导致工具调用失败。
+
+**已知限制**
+
+- **让位是靠取消"等待"实现的**：`exec_managed` 内部用 `asyncio.shield` 保护进程任务，因此取消不会杀进程，托管会话仍在会话表里、`cursor` 停在原处，模型可用 `astrbot_shell_session` 续查。但若用户在工具刚启动的瞬间发消息（微秒级窗口），会话可能尚未登记，此时占位里会提示模型用 `action='list'` 自查，而不是假设成功。
+- **不提供 `session_id`**：让位占位里 `session_id` 为 `null`，需模型主动 `action='list'` 定位会话。这样不会误报一个尚未确认的句柄。
+- **在途 LLM API 调用不可控**：若模型本次响应耗时很长，而消息恰好落在 API 生成期间，那一轮仍要等它返回；但下一次工具启动会立刻以 `yield_time_ms=0` 让位，不会二次阻塞。
+- **只向下调整，绝不上调**：不会覆盖其他插件或模型自身设定的更短等待。
+
+**关于 follow-up 序号残留**
+
+AstrBot 核心的 `follow_up._FOLLOW_UP_ORDER_STATE` 以会话为键保存 `next_order` 递增计数器，但释放条件写成「无排队槽位 **且** 无活跃 runner」。而「消息被合并进工具结果」这条路径上 runner 必然仍活跃（正是它在消费 ticket），该条件永不成立，导致 `next_order` 单调增长、永不清零。
+
+`tool_deadline_reset_follow_up_seq` 开启后，插件会在安全时机（新消息到达、API 请求发出）主动释放：**仅当该会话已无 `pending`/`active` 槽位时**才会动作，因此不会打乱仍在排队的 follow-up 顺序。核心模块缺失或结构变化时自动跳过，不影响插件运行。
+
+**自测**
+
+```bash
+python test_tool_deadline.py -v
+```
+
+脚本自带 AstrBot 桩模块，不需要安装 AstrBot，也不发起网络请求或子进程。
+
+
+### 📋 自动内容审核校正 (content_audit)
 
 自动审核 AI 回复质量，支持轮数触发和关键词触发两种方式。审核结果会在下一条用户消息时以 `<system_WARNING>` 标签注入，引导 LLM 调整回复风格。
 > 本功能与1.3.2更新为异步处理，审核llm回复后才插入用户消息当中，避免阻塞。

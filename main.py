@@ -21,6 +21,7 @@ from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
 from .core.image_caption import ImageCaptionHandler
 from .core.content_audit import ContentAuditLoop
+from .core.tool_deadline import ToolDeadlineGuard
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
 from .tools.weather import run_weather_location, run_weather, run_weather_history
@@ -52,7 +53,7 @@ from .tools.calendar import run_get_calendar
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.6.14",
+    "1.7.0",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -266,6 +267,37 @@ class ToolboxPlugin(Star):
 
         self.image_caption_handler = ImageCaptionHandler(self)
 
+        # ---- 用户消息交付时限（工具让位） ----
+        # 无消息插入时：工具参数原样透传，行为与关闭本功能完全一致。
+        # 有消息插入时：在消息到达那一刻把命令转入后台，立刻发出下一次 API 请求。
+        self.tool_deadline_enabled = self._safe_bool(
+            self.config.get("tool_deadline_enabled", True), True
+        )
+        self.tool_deadline_private_only = self._safe_bool(
+            self.config.get("tool_deadline_private_only", True), True
+        )
+        self.tool_deadline_grace_ms = self._safe_int(
+            self.config.get("tool_deadline_grace_ms", 0), 0, 0, 600000
+        )
+        self.tool_deadline_wait_tools = self._parse_string_list(
+            self.config.get("tool_deadline_wait_tools", [])
+        )
+        self.tool_deadline_skip_tools = self._parse_string_list(
+            self.config.get("tool_deadline_skip_tools", [])
+        )
+        self.tool_deadline_reset_follow_up_seq = self._safe_bool(
+            self.config.get("tool_deadline_reset_follow_up_seq", True), True
+        )
+        self.tool_deadline = ToolDeadlineGuard(
+            enabled=self.tool_deadline_enabled,
+            private_only=self.tool_deadline_private_only,
+            grace_ms=self.tool_deadline_grace_ms,
+            wait_tools=self.tool_deadline_wait_tools,
+            skip_tools=self.tool_deadline_skip_tools,
+            reset_follow_up_seq=self.tool_deadline_reset_follow_up_seq,
+        )
+        self.tool_deadline.install()
+
         # 网页抓取配置
         self.fetch_url_max_chars = self._safe_int(
             self.config.get("fetch_url_max_chars"), 6000, 200, 200000
@@ -390,6 +422,13 @@ class ToolboxPlugin(Star):
         # 用户发送 /recall 时设置，下一次 on_llm_request 注入后立即清除
         self._recall_pending: dict[str, str] = {}
         self._recall_pending_lock = asyncio.Lock()
+
+    async def terminate(self) -> None:
+        """插件卸载时还原工具补丁，避免热重载后叠加多层包装。"""
+        try:
+            self.tool_deadline.uninstall()
+        except Exception:
+            logger.warning("[tool_deadline] 卸载还原失败", exc_info=True)
 
     def _load_goals(self) -> dict[str, dict]:
         """从磁盘加载 goals.json，返回 dict。"""
@@ -2211,6 +2250,42 @@ class ToolboxPlugin(Star):
             llm_compress=llm_compress_mode,
             use_proxy=use_proxy,
         )
+
+    # =====================================================================
+    # 用户消息交付时限（工具让位）
+    # =====================================================================
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE
+    )
+    async def tool_deadline_mark_arrival(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ):
+        """记录"有用户消息正在等待交付"，并清理遗留的 follow-up 序号状态。
+
+        只置位一个内存信号：不设置结果、不中断事件传播，因此对既有插件链路
+        与 LLM 调用没有任何行为改变。
+        """
+        self.tool_deadline.mark_arrival(event)
+        # 新消息尚未被 follow-up 捕获，此刻是最安全的清理时机
+        self.tool_deadline.reset_stale_follow_up_seq(event)
+
+    @filter.on_llm_request()
+    async def tool_deadline_on_llm_request(
+        self, event: AstrMessageEvent, request: Any = None, *args, **kwargs
+    ) -> None:
+        """API 请求即将发出：消息已被交付，清除信号并补齐工具补丁。
+
+        工具类在运行时从 ``request.func_tool`` 中发现，因此不需要硬编码
+        AstrBot 内部的模块路径，也不会影响沙箱版 / MCP / 业务工具。
+        """
+        self.tool_deadline.on_llm_request(event, request)
+
+    @filter.after_message_sent()
+    async def tool_deadline_after_message_sent(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ) -> None:
+        """响应发送后清理残留信号（兜底，避免跨轮次污染）。"""
+        self.tool_deadline.clear(event)
 
     @filter.on_llm_request()
     async def on_llm_request(

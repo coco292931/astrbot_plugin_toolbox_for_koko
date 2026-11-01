@@ -1,6 +1,57 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.7.0] - 2026-11-02
+
+### ✨ 新增
+
+- **用户消息交付时限（工具让位，`core/tool_deadline.py`）**：用户在 Agent 运行期间发来的
+  消息，只会在下一次 LLM API 请求时随工具返回值交付。开启后，命令执行期间一旦有用户
+  消息插入，命令会在消息到达的那一刻转入后台，让 Agent 立刻发出下一次请求。
+
+  | 状态 | 行为 |
+  |---|---|
+  | 没有消息插入 | `yield_time_ms` **原样透传**，返回值逐字节相同，零额外轮次 |
+  | 工具执行期间有消息插入 | 消息到达**那一刻**命令转后台，立刻发出下一次 API 请求 |
+  | 消息在工具启动前就在等 | 以 `yield_time_ms=0` 启动，直接返回真实 `session_id` |
+
+  - 实现方式：拦截托管会话类工具的 `call`，把一次长等待拆成「启动 + 可中断的等待」。
+    原生调用与消息信号竞速：原生先完成就原样返回；消息先到则取消**等待**而不是进程。
+    `exec_managed` 内部用 `asyncio.shield` 保护进程任务，因此托管会话仍留在会话表里、
+    已读 `cursor` 停在原处，模型可用 `astrbot_shell_session` 续查。
+  - 「待交付」信号的清除点：AstrBot 的 `OnLLMRequestEvent` 每次 Agent 运行只触发一次，
+    覆盖不到 runner 内部的后续 step。若只依赖它，信号会一直置位，同一轮里之后每个工具
+    都被强制 `yield_time_ms=0`，模型只能反复轮询。因此插件在活跃 runner 实例的 `step()`
+    上挂清除钩子——`step()` 与 API 请求一一对应，是精确的交付边界。
+  - 新增配置组 `tool_deadline`：`tool_deadline_enabled`、`tool_deadline_private_only`、
+    `tool_deadline_grace_ms`、`tool_deadline_wait_tools`、`tool_deadline_skip_tools`、
+    `tool_deadline_reset_follow_up_seq`。
+  - 新增自测脚本 `test_tool_deadline.py`（自带 AstrBot 桩模块，无需安装 AstrBot）。
+
+### 🐛 修复
+
+- **follow-up 序号无法清零**：AstrBot 核心 `_FOLLOW_UP_ORDER_STATE` 的释放条件要求
+  「无排队槽位」且「无活跃 runner」，而「消息被合并进工具结果」这条路径上 runner 必然
+  活跃（正是它在消费 ticket），条件永不成立，`next_order` 只好单调增长。
+  `tool_deadline_reset_follow_up_seq`（默认开启）在会话无 `pending`/`active` 槽位时
+  主动释放，不影响排队顺序；核心模块缺失或结构变化时自动跳过。
+
+### 🔧 变更
+
+- `core/config.py::extract_grouped_runtime_config` 支持 `tool_deadline` 分组，并兼容扁平键写法。
+
+### 🛡️ 兜底与兼容
+
+- 只拦截 `LocalExecuteShellTool` / `ShellSessionTool`（唯一能"转后台并续查"的工具）；
+  沙箱版 `ExecuteShellTool`、MCP 工具与业务工具完全不碰。
+- 工具类在运行时从 `ProviderRequest.func_tool` 中发现，不硬编码 AstrBot 内部模块路径。
+- AstrBot 4.22.0 及更早版本没有托管会话机制，本功能自动退化为空操作，不影响插件加载。
+- 后台唤醒/定时任务事件（platform 为 `cron`）一律跳过。
+- 插件卸载（`terminate`）还原原始方法，避免热重载后叠加多层包装。
+- 让位占位不谎报 `session_id`，明确提示模型用 `action='list'` 自查会话。
+- 任何异常都退回原生实现，绝不因为本功能导致工具调用失败。
+
 ## [1.6.13] - 2026-08-29
+
 
 ### ✨ 新增
 

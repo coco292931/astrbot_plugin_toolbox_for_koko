@@ -627,5 +627,54 @@
                 "default": ""
             }
         }
+    },
+    "tool_deadline": {
+        "description": "用户消息交付时限（工具让位）",
+        "type": "object",
+        "hint": "用户在 Agent 运行期间发来的消息，只会在下一次 LLM API 请求时交付。开启后，命令执行期间一旦有用户消息插入，命令会立刻转入后台并返回句柄，让 Agent 马上发出下一次请求。没有消息插入时，工具参数原样透传，行为与关闭本功能完全一致。",
+        "items": {
+            "tool_deadline_enabled": {
+                "description": "启用工具让位",
+                "type": "bool",
+                "hint": "关闭后本模块完全不介入，连工具类补丁都不会打。",
+                "default": true
+            },
+            "tool_deadline_private_only": {
+                "description": "仅私聊生效",
+                "type": "bool",
+                "hint": "群聊中他人消息不受 follow-up 机制捕获，开启可保持群聊原生行为。",
+                "default": true
+            },
+            "tool_deadline_grace_ms": {
+                "description": "让位宽限（毫秒）",
+                "type": "int",
+                "hint": "用户消息到达后，额外等待命令自然结束的时间。默认 0 表示消息一到立刻让位（毫秒级）。设为正数可让马上跑完的命令自然收尾，代价是交付延迟最多增加该值。",
+                "default": 0
+            },
+            "tool_deadline_wait_tools": {
+                "description": "拦截工具白名单（类名）",
+                "hint": "留空表示自动识别 LocalExecuteShellTool 与 ShellSessionTool。填写类名可覆盖默认名单。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "tool_deadline_skip_tools": {
+                "description": "拦截工具黑名单（类名）",
+                "hint": "优先级高于白名单，例如把某些必须同步跑完的工具排除。",
+                "type": "list",
+                "items": {
+                    "type": "string"
+                },
+                "default": []
+            },
+            "tool_deadline_reset_follow_up_seq": {
+                "description": "清理残留的 follow-up 序号",
+                "hint": "补偿 AstrBot 核心状态：消息被合并进工具结果后，其 follow-up 序号状态不会被释放，导致 seq 单调增长、永不清零。开启后在会话无排队消息时主动释放。",
+                "type": "bool",
+                "default": true
+            }
+        }
     }
 }
