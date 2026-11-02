@@ -25,6 +25,8 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .request_utils import make_text_part
+
 
 # 默认审核 LLM prompt
 DEFAULT_AUDIT_PROMPT = (
@@ -609,9 +611,12 @@ class ContentAuditLoop:
                 and request.extra_user_content_parts
             ):
                 try:
-                    request.extra_user_content_parts.append(
-                        type(request.extra_user_content_parts[0])(text=text)
+                    part = make_text_part(
+                        text, template=request.extra_user_content_parts[0]
                     )
+                    if part is None:
+                        raise ValueError("无法构造文本 part")
+                    request.extra_user_content_parts.append(part)
                     logger.info(f"[{tag}] 已注入校正指示(conversation)到 key={key}")
                     return
                 except Exception as e:
@@ -640,9 +645,12 @@ class ContentAuditLoop:
                 and request.extra_user_content_parts
             ):
                 try:
-                    request.extra_user_content_parts.append(
-                        type(request.extra_user_content_parts[0])(text=text)
+                    part = make_text_part(
+                        text, template=request.extra_user_content_parts[0]
                     )
+                    if part is None:
+                        raise ValueError("无法构造文本 part")
+                    request.extra_user_content_parts.append(part)
                     logger.info(f"[{tag}] 已注入校正指示(extra-回退)到 key={key}")
                 except Exception as e:
                     self._log_debug(f"[{tag}] 注入校正指示(extra-回退)失败: {e}")

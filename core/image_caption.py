@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 from pathlib import Path
@@ -84,7 +85,10 @@ class ImageCaptionHandler:
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
-        self._install_astrbot_caption_error_patch()
+        self._original_ensure_img_caption: Any = None
+        # 仅在图片转述钩子启用时才打补丁：关闭该功能时不应改变 AstrBot 行为
+        if getattr(plugin, "image_caption_hook_enabled", False):
+            self._install_astrbot_caption_error_patch()
         self._semaphore: asyncio.Semaphore | None = None
 
     def _get_semaphore(self) -> asyncio.Semaphore:
@@ -99,7 +103,13 @@ class ImageCaptionHandler:
         return max(15, int(getattr(self.plugin, "image_caption_timeout", 120) or 120))
 
     def _install_astrbot_caption_error_patch(self) -> None:
-        """运行时 patch AstrBot，把原始图片转述异常透传到 request。"""
+        """运行时 patch AstrBot，把原始图片转述异常透传到 request。
+
+        注意：AstrBot 4.26+ 的 ``_ensure_img_caption`` 增加了 ``montage_refs``
+        参数并返回"已成功转述的图片引用集合"。旧补丁既没有该参数、也不返回值，
+        一旦被调用就会抛 ``TypeError``/``TypeError: 'NoneType' is not iterable``。
+        这里改为按被包装函数的真实签名自适应，并原样返回结果类型。
+        """
         try:
             from astrbot.core import astr_main_agent as astr_main_agent
             from astrbot.core.agent.message import TextPart as CoreTextPart
@@ -114,35 +124,63 @@ class ImageCaptionHandler:
         if getattr(current, self._PATCH_FLAG, False):
             return
 
+        try:
+            target = getattr(current, "__wrapped__", current)
+            params = inspect.signature(target).parameters
+        except Exception:
+            params = {}
+        supports_montage = "montage_refs" in params
+
         async def patched_ensure_img_caption(
             event: Any,
             req: Any,
             cfg: dict,
             plugin_context: Any,
             image_caption_provider: str,
-        ) -> None:
+            montage_refs: set[str] | None = None,
+        ) -> set[str]:
+            # 沿用 AstrBot 的语义：返回"已成功转述的图片引用集合"
+            image_refs = set(getattr(req, "image_urls", []) or [])
             try:
                 compressed_urls = []
-                for url in req.image_urls:
-                    compressed_url = await astr_main_agent._compress_image_for_provider(
-                        url, cfg
+                compress = getattr(
+                    astr_main_agent, "_compress_image_for_provider", None
+                )
+                source_urls = list(getattr(req, "image_urls", []) or [])
+                for url in source_urls:
+                    compressed_url = (
+                        await compress(url, cfg) if compress is not None else url
                     )
                     compressed_urls.append(compressed_url)
-                    if astr_main_agent._is_generated_compressed_image_path(
-                        url, compressed_url
-                    ):
+                    is_generated = getattr(
+                        astr_main_agent, "_is_generated_compressed_image_path", None
+                    )
+                    if is_generated is not None and is_generated(url, compressed_url):
                         event.track_temporary_local_file(compressed_url)
-                caption = await astr_main_agent._request_img_caption(
-                    image_caption_provider,
-                    cfg,
-                    compressed_urls,
-                    plugin_context,
-                )
+                kwargs: dict[str, Any] = {}
+                if supports_montage and montage_refs is not None:
+                    kwargs["montage_refs"] = montage_refs
+                try:
+                    caption = await astr_main_agent._request_img_caption(
+                        image_caption_provider,
+                        cfg,
+                        compressed_urls,
+                        plugin_context,
+                        **kwargs,
+                    )
+                except TypeError:
+                    # 兜底：该版本的 _request_img_caption 不接受额外参数
+                    caption = await astr_main_agent._request_img_caption(
+                        image_caption_provider,
+                        cfg,
+                        compressed_urls,
+                        plugin_context,
+                    )
                 if caption:
                     req.extra_user_content_parts.append(
                         CoreTextPart(text=f"<image_caption>{caption}</image_caption>")
                     )
-                    req.image_urls = []
+                    return image_refs
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[ImageCaptionPatch] 处理图片描述失败: %s", exc)
                 error_payload = {
@@ -163,11 +201,30 @@ class ImageCaptionHandler:
                 )
             finally:
                 req.image_urls = []
+            return set()
 
         setattr(patched_ensure_img_caption, self._PATCH_FLAG, True)
         setattr(patched_ensure_img_caption, "__wrapped__", current)
+        self._original_ensure_img_caption = current
         astr_main_agent._ensure_img_caption = patched_ensure_img_caption
         logger.info("[ImageCaption] 已安装 AstrBot 图片转述错误透传补丁")
+
+    def uninstall_astrbot_caption_error_patch(self) -> None:
+        """还原 ``_ensure_img_caption``，避免插件卸载/热重载后叠加补丁。"""
+        original = getattr(self, "_original_ensure_img_caption", None)
+        if original is None:
+            return
+        try:
+            from astrbot.core import astr_main_agent as astr_main_agent
+
+            current = getattr(astr_main_agent, "_ensure_img_caption", None)
+            if current is not None and getattr(current, self._PATCH_FLAG, False):
+                astr_main_agent._ensure_img_caption = original
+                logger.info("[ImageCaption] 已还原 AstrBot 图片转述补丁")
+        except Exception:
+            logger.debug("[ImageCaption] 还原补丁失败", exc_info=True)
+        finally:
+            self._original_ensure_img_caption = None
 
     def _extract_failure_payload(self, request: Any) -> dict[str, str] | None:
         if not hasattr(request, "extra_user_content_parts"):

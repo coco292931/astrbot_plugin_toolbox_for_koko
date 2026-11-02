@@ -211,6 +211,30 @@ python test_tool_deadline.py -v
 脚本自带 AstrBot 桩模块，不需要安装 AstrBot，也不发起网络请求或子进程。
 
 
+### 🛡️ 请求注入安全 (request_utils)
+
+`ProviderRequest.extra_user_content_parts` 的元素是 pydantic 建模的 `ContentPart`
+子类（`TextPart` / `ImageURLPart` / `AudioURLPart` / `ThinkPart` …），字段是必填的。
+
+本插件注入 Goal / Recall / 内容审核文本时，**始终构造 `TextPart`**，不参考已有
+part 的类型。原因是早期实现写成 `type(parts[0])(text=...)`：纯图片消息里
+`parts[0]` 是 `ImageURLPart`，`text` 被静默忽略而 `image_url` 必填缺失，
+于是抛 `ValidationError` 并被 `except Exception` 吞掉 —— **Goal / Recall 在只发
+图片时会静默失效**。
+
+覆盖的注入场景均有测试：纯文本、纯图、图文混合（两种顺序）、文件、语音、
+引用图片，以及首元素是 `dict` / `think` / `image_url` / `audio_url` 的情况。
+
+此外，`image_caption` 对 AstrBot `_ensure_img_caption` 的补丁已改为按真实签名
+自适应（支持 `montage_refs` 并返回 `set[str]`），且仅在
+`image_caption_hook_enabled` 开启时安装，插件卸载时还原。
+
+**自测**
+
+```bash
+python test_request_safety.py -v
+```
+
 ### 📋 自动内容审核校正 (content_audit)
 
 自动审核 AI 回复质量，支持轮数触发和关键词触发两种方式。审核结果会在下一条用户消息时以 `<system_WARNING>` 标签注入，引导 LLM 调整回复风格。

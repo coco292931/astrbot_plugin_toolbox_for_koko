@@ -1,5 +1,36 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.7.1] - 2026-11-02
+
+### 🐛 修复
+
+- **Goal / Recall / 内容审核在"只发图片"的消息里静默丢失**：
+  早期实现为了拿到"带 `model_dump_for_context` 的 part"，写成
+  `type(request.extra_user_content_parts[0])(text=...)`，即照抄首个 part 的**类型**。
+  纯图片消息里首个 part 是 `ImageURLPart`：`text` 不是它的字段会被 pydantic
+  静默忽略，`image_url` 必填缺失则抛 `ValidationError`，而调用方用
+  `except Exception` 包着，异常被吞掉 —— 于是注入直接失效，日志里只有一行 debug。
+  - 新增 `core/request_utils.py::make_text_part`：**始终构造 `TextPart`**，
+    不再参考 `parts[0]` 的类型；模板仅在 `TextPart` 无法导入且本身是文本 part
+    时才作为兜底。
+  - `main.py`（Goal / Recall）与 `core/content_audit.py`（内容审核 / 人格审核）
+    全部改用该函数。
+- **`_ensure_img_caption` 猴补丁签名过期**：AstrBot 4.26+ 给该函数增加了
+  `montage_refs` 参数，并返回"已成功转述的图片引用集合"。旧补丁既没有该参数、
+  也不返回值 —— 一旦被调用就是 `TypeError`，或返回 `None` 让后续成员判断崩溃。
+  - 改为按被包装函数的真实签名自适应，并原样返回 `set[str]`。
+  - **仅在 `image_caption_hook_enabled` 开启时才安装补丁**，关闭该功能时不改变
+    AstrBot 行为。
+  - 新增 `uninstall_astrbot_caption_error_patch()`，在插件 `terminate()` 时还原，
+    避免热重载后叠加多层包装。
+  - `_compress_image_for_provider` 缺失时退化为直接使用原引用。
+
+### ✅ 测试
+
+- 新增 `test_request_safety.py`（16 项）：各种消息形态下的注入目标、
+  旧写法的对照实验（确认它确实会失败）、以及转述补丁的签名/返回值/
+  失败载荷/加载条件/卸载还原。
+
 ## [1.7.0] - 2026-11-02
 
 ### ✨ 新增

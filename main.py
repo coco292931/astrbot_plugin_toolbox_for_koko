@@ -21,6 +21,7 @@ from .core.memory_manager import MemoryManager as CoreMemoryManager
 from .core.kc_context import KCContextManager
 from .core.image_caption import ImageCaptionHandler
 from .core.content_audit import ContentAuditLoop
+from .core.request_utils import make_text_part
 from .core.tool_deadline import ToolDeadlineGuard
 
 # lazy imports for tools (avoid ModuleNotFoundError when called via LLM tool executor)
@@ -53,7 +54,7 @@ from .tools.calendar import run_get_calendar
     "astrbot_plugin_toolbox_for_koko",
     "coco",
     "多功能工具箱",
-    "1.7.0",
+    "1.7.1",
     "https://github.com/coco292931/astrbot_plugin_toolbox_for_koko",
 )
 class ToolboxPlugin(Star):
@@ -424,11 +425,15 @@ class ToolboxPlugin(Star):
         self._recall_pending_lock = asyncio.Lock()
 
     async def terminate(self) -> None:
-        """插件卸载时还原工具补丁，避免热重载后叠加多层包装。"""
+        """插件卸载时还原工具补丁与图片转述补丁，避免热重载后叠加。"""
         try:
             self.tool_deadline.uninstall()
         except Exception:
             logger.warning("[tool_deadline] 卸载还原失败", exc_info=True)
+        try:
+            self.image_caption_handler.uninstall_astrbot_caption_error_patch()
+        except Exception:
+            logger.warning("[image_caption] 卸载还原失败", exc_info=True)
 
     def _load_goals(self) -> dict[str, dict]:
         """从磁盘加载 goals.json，返回 dict。"""
@@ -2402,18 +2407,20 @@ class ToolboxPlugin(Star):
                                 request.system_prompt = goal_block
                     else:
                         # 追加到当前用户消息末尾（不写入 contexts/历史）
-                        # 优先复用已有 part 的类型（TextPart，带 model_dump_for_context），
-                        # 避免使用 Plain 组件导致 'Plain' object has no attribute 'model_dump_for_context'
+                        # 必须显式构造 TextPart：图片消息的首个 part 是
+                        # ImageURLPart，照抄它的类型会因缺少 image_url 而抛
+                        # ValidationError，被 except 吞掉后注入静默失效。
                         if (
                             hasattr(request, "extra_user_content_parts")
                             and request.extra_user_content_parts
                         ):
                             try:
-                                request.extra_user_content_parts.append(
-                                    type(request.extra_user_content_parts[0])(
-                                        text=f"\n{goal_block}"
-                                    )
+                                part = make_text_part(
+                                    f"\n{goal_block}",
+                                    template=request.extra_user_content_parts[0],
                                 )
+                                if part is not None:
+                                    request.extra_user_content_parts.append(part)
                             except Exception as e:
                                 logger.debug(
                                     f"[goal] 注入到 extra_user_content_parts 失败: {e}"
@@ -2445,16 +2452,17 @@ class ToolboxPlugin(Star):
                         and request.extra_user_content_parts
                     ):
                         try:
-                            request.extra_user_content_parts.append(
-                                type(request.extra_user_content_parts[0])(
-                                    text=f"\n{recall_block}"
+                            part = make_text_part(
+                                f"\n{recall_block}",
+                                template=request.extra_user_content_parts[0],
+                            )
+                            if part is not None:
+                                request.extra_user_content_parts.append(part)
+                                logger.info(
+                                    f"[recall] 已一次性注入人格回顾(conversation)，"
+                                    f"session={event.unified_msg_origin}"
                                 )
-                            )
-                            logger.info(
-                                f"[recall] 已一次性注入人格回顾(conversation)，"
-                                f"session={event.unified_msg_origin}"
-                            )
-                            injected = True
+                                injected = True
                         except Exception as e:
                             logger.debug(
                                 f"[recall] 注入到 extra_user_content_parts 失败: {e}"
