@@ -1,5 +1,37 @@
 # 🧰 Koko 多功能工具箱 (Toolbox for Koko) 更新日志
 
+## [1.7.2] - 2026-11-03
+
+### ✨ 新增
+
+- **`include_img` 参数（网页抓取）**：`tool_fetch_url` / `koko_fetch_url` 新增
+  `include_img`（默认 `false`）。
+  - 关闭（默认）：只在原文图片位置插入 `[图片: 无障碍释义]`，保留图文顺序。
+  - 开启：同一位置改为 `[图片: 释义](https://…)`，URL 已去掉 `wx_fmt`、`from` 等
+    跟踪标识与全部查询参数，`data-src`/`data-original` 等惰性加载属性会被优先采用。
+  - `alt` 为 `image.png`、`图片1` 这类占位描述时不参与释义，只输出 `[图片]`。
+
+### 🐛 修复
+
+- **微信公众号文章抓取失败**：`mp.weixin.qq.com` 会按 UA 返回
+  「环境异常，完成验证后即可继续访问」的验证页（约 18KB），原有 UA 池里的
+  Linux Chrome UA 正好命中，而该验证页既没有 `challenge-platform` 也没有
+  SPA 特征，于是被当成正文原样返回。
+  - 公众号域名改用微信内置浏览器（iOS/Windows 微信）与桌面浏览器 UA，
+    并补上 `Accept-Language` 与 `Referer: https://mp.weixin.qq.com/`。
+  - 新增验证页识别（`环境异常` / `完成验证后即可继续访问` / 正文容器缺失或为空），
+    命中后自动更换 UA 重试（最多一轮 profile 数），全部失败才返回明确的异常信息。
+  - 正文改为直接取 `#js_content` 容器，并在文首补「标题 / 公众号 / 摘要」，
+    不再依赖 readability 对公众号模板的猜测。
+- **大页面正文被截断**：`aiohttp` 的 `StreamReader.read(n)` 在压缩/大响应下可能提前返回
+  （实测 3.5MB 的公众号页面只读到 128KB），导致提取不到正文。改为按块累积读到 EOF，
+  超过 `fetch_url_max_download_bytes` 才终止，与原有大小限制语义一致。
+
+### ✅ 测试
+
+- 新增 `test_fetch_url.py`（23 项，全离线）：图片标记与 URL 清洗、公众号 UA/请求头、
+  验证页与骨架页识别、换 UA 重试流程、legacy 模式单次抓取、`include_img` 参数透传。
+
 ## [1.7.1] - 2026-11-02
 
 ### 🐛 修复

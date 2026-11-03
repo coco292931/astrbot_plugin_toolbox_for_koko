@@ -987,7 +987,7 @@ class ToolboxPlugin(Star):
         if self.enable_fetch_url:
             registry["tool_fetch_url"] = {
                 "name": "tool_fetch_url",
-                "description": "抓取单个网页正文文本。适合对指定 URL 做内容提取。",
+                "description": "抓取单个网页正文文本，适合对指定 URL 做内容提取。图片位置会保留 [图片: 释义] 标记；include_img=true 时附带图片直链。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1007,6 +1007,10 @@ class ToolboxPlugin(Star):
                         "use_proxy": {
                             "type": "boolean",
                             "description": "可选：true=通过配置的 fetch_url_proxy 代理抓取（适合被墙站点）；false(默认)=直连。",
+                        },
+                        "include_img": {
+                            "type": "boolean",
+                            "description": "可选：true=在图片位置附带净化后的图片URL；false(默认)=仅保留 [图片: 无障碍释义] 标记。",
                         },
                     },
                     "required": ["url"],
@@ -2230,14 +2234,18 @@ class ToolboxPlugin(Star):
         skip_filter: bool = False,
         llm_compress: str = "inherit",
         use_proxy: bool = False,
+        include_img: bool = False,
     ) -> str:
         """抓取单个网页正文文本，适合对指定 URL 做内容提取。
+
+        图片位置会保留 `[图片: 释义]` 标记；include_img=true 时附带图片直链。
 
         Args:
             url(string): 网页URL，必须以 http:// 或 https:// 开头
             skip_filter(boolean): false(默认)=增强抓取逻辑，true=原版逻辑
             llm_compress(string): inherit=按用户配置(默认)，summary=超长时LLM压缩，truncate=超长时截断
             use_proxy(boolean): true=通过配置的 fetch_url_proxy 代理抓取，false(默认)=直连
+            include_img(boolean): true=在图片位置附带净化后的图片URL，false(默认)=只保留[图片: 释义]标记
         """
         if not self.enable_fetch_url:
             return "网页抓取功能已被禁用。"
@@ -2254,6 +2262,7 @@ class ToolboxPlugin(Star):
             use_legacy=skip_filter,
             llm_compress=llm_compress_mode,
             use_proxy=use_proxy,
+            include_img=self._safe_bool(include_img, False),
         )
 
     # =====================================================================

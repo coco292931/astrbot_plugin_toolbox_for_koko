@@ -6,8 +6,10 @@ import asyncio
 import io
 import json
 import ipaddress
+import html as html_lib
 import os
 import random
+import re
 import socket
 import traceback
 from datetime import datetime
@@ -58,18 +60,174 @@ def _parse_llm_compress_mode(value) -> str | None:
     return None
 
 
+_GENERIC_IMAGE_ALT_VALUES = {
+    "",
+    "image",
+    "img",
+    "picture",
+    "photo",
+    "pic",
+    "untitled",
+    "screenshot",
+    "图片",
+    "图像",
+    "截图",
+    "暂无",
+    "无",
+}
+
+_GENERIC_IMAGE_ALT_PATTERN = re.compile(
+    r"(?:image|img|picture|photo|pic|untitled|screenshot|图片|截图)[\s_\-.]*\d*"
+    r"\.(?:png|jpe?g|gif|webp|bmp|svg)",
+    re.IGNORECASE,
+)
+
+
 async def _tidy_text(text: str) -> str:
     return " ".join(text.split())
 
 
-async def _extract_best_text_from_html(html: str) -> str:
+def _is_generic_image_alt(alt: str) -> bool:
+    """判断 alt 是否只是无意义的占位描述（如 image.png、图片1）。"""
+    lowered = alt.strip().lower()
+    if lowered in _GENERIC_IMAGE_ALT_VALUES:
+        return True
+    return bool(_GENERIC_IMAGE_ALT_PATTERN.fullmatch(lowered))
+
+
+def _clean_image_url(raw_url: Any) -> str:
+    """清洗图片地址：补全协议、去掉跟踪标识与查询参数。"""
+    if not raw_url:
+        return ""
+    url = html_lib.unescape(str(raw_url)).strip().strip("'\"")
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = f"https:{url}"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return urllib.parse.urlunparse(
+        parsed._replace(params="", query="", fragment="")
+    )
+
+
+def _pick_image_url(img) -> str:
+    """按惰性加载的常见属性顺序取图片地址。"""
+    for attr in ("data-src", "data-original", "data-actualsrc", "data-lazy-src", "src"):
+        cleaned = _clean_image_url(img.get(attr))
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _build_image_marker(img, include_img: bool) -> str:
+    """生成图片占位标记：默认只带无障碍释义，include_img 时附带净化后的地址。"""
+    alt = " ".join(str(img.get("alt") or "").split())
+    if alt and _is_generic_image_alt(alt):
+        alt = ""
+    marker = f"[图片: {alt}]" if alt else "[图片]"
+    if include_img:
+        url = _pick_image_url(img)
+        if url:
+            return f"{marker}({url})"
+    return marker
+
+
+def _replace_images_with_markers(soup, include_img: bool) -> None:
+    for img in soup.find_all("img"):
+        img.replace_with(f" {_build_image_marker(img, include_img)} ")
+
+
+async def _html_fragment_to_text(fragment: str, include_img: bool = False) -> str:
+    soup = BeautifulSoup(fragment, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "canvas"]):
+        tag.decompose()
+    _replace_images_with_markers(soup, include_img)
+    return await _tidy_text(soup.get_text(" ", strip=True))
+
+
+def _is_wechat_page(html: str, source_url: str = "") -> bool:
+    if source_url and _is_wechat_article_url(source_url):
+        return True
+    return "rich_media_content" in html or 'id="js_content"' in html
+
+
+def _wechat_content_html(soup) -> str:
+    """取公众号正文容器（#js_content）的 HTML。"""
+    node = soup.find(id="js_content")
+    if node is None:
+        node = soup.find(class_="rich_media_content")
+    if node is None:
+        return ""
+    if not node.find("img") and len(node.get_text(" ", strip=True)) < 10:
+        return ""
+    return str(node)
+
+
+def _wechat_meta(soup) -> tuple[str, str, str]:
+    """取公众号文章的标题、公众号名与摘要。"""
+
+    def _text_of(node_id: str) -> str:
+        node = soup.find(id=node_id)
+        return " ".join(node.get_text(" ", strip=True).split()) if node else ""
+
+    def _meta(*attrs: tuple[str, str]) -> str:
+        for attr, value in attrs:
+            node = soup.find("meta", attrs={attr: value})
+            content = str((node.get("content") if node else "") or "")
+            content = " ".join(content.split())
+            if content:
+                return content
+        return ""
+
+    title = (
+        _text_of("activity-name")
+        or _meta(("property", "og:title"), ("name", "twitter:title"))
+        or (soup.title.string.strip() if soup.title and soup.title.string else "")
+    )
+    account = _text_of("js_name") or _text_of("js_author_name")
+    description = _meta(("property", "og:description"), ("name", "description"))
+    return title, account, description
+
+
+def _format_wechat_header(title: str, account: str, description: str) -> str:
+    lines = []
+    if title:
+        lines.append(f"标题：{title}")
+    if account:
+        lines.append(f"公众号：{account}")
+    if description:
+        lines.append(f"摘要：{description}")
+    return "\n".join(lines)
+
+
+async def _extract_best_text_from_html(
+    html: str, include_img: bool = False, source_url: str = ""
+) -> str:
     primary_text = ""
-    if _HAS_READABILITY and _HAS_BS4:
+    wechat_header = ""
+    wechat_content = ""
+
+    if _HAS_BS4 and _is_wechat_page(html, source_url):
+        page_soup = BeautifulSoup(html, "html.parser")
+        wechat_content = _wechat_content_html(page_soup)
+        if wechat_content:
+            wechat_header = _format_wechat_header(*_wechat_meta(page_soup))
+
+    if wechat_content:
+        # 公众号正文集中在 #js_content，直接取容器比 readability 更稳定
+        primary_text = await _html_fragment_to_text(wechat_content, include_img)
+        if primary_text:
+            if wechat_header:
+                return f"{wechat_header}\n\n{primary_text}"
+            return primary_text
+
+    if not primary_text and _HAS_READABILITY and _HAS_BS4:
         try:
             doc = Document(html)
             summary_html = doc.summary(html_partial=True)
-            soup = BeautifulSoup(summary_html, "html.parser")
-            primary_text = await _tidy_text(soup.get_text(" ", strip=True))
+            primary_text = await _html_fragment_to_text(summary_html, include_img)
         except Exception:
             primary_text = ""
 
@@ -80,6 +238,7 @@ async def _extract_best_text_from_html(html: str) -> str:
         full_soup = BeautifulSoup(html, "html.parser")
         for tag in full_soup(["script", "style", "noscript", "svg", "canvas"]):
             tag.decompose()
+        _replace_images_with_markers(full_soup, include_img)
         fallback_text = await _tidy_text(full_soup.get_text(" ", strip=True))
         if fallback_text:
             return fallback_text
@@ -154,6 +313,23 @@ async def _detect_unextractable_page_reason(html: str) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
     body_text = await _tidy_text(soup.get_text(" ", strip=True))
 
+    # 微信/部分站点的"环境异常，完成验证后即可继续访问"拦截页
+    if len(body_text) < 500 and (
+        "环境异常" in body_text or "完成验证后即可继续访问" in body_text
+    ):
+        return "页面触发了站点反爬验证（如微信“环境异常”），当前 UA 无法获取正文。"
+
+    # 公众号页面偶发只返回页面骨架（正文容器缺失或为空），同样视为被风控拦截
+    if "rich_media" in lowered and ("appmsg" in lowered or "weixin" in lowered):
+        content_node = soup.find(id="js_content") or soup.find(
+            class_="rich_media_content"
+        )
+        if content_node is None:
+            return "公众号页面未返回正文容器（可能被风控/验证拦截），当前 UA 无法获取正文。"
+        content_text = await _tidy_text(content_node.get_text(" ", strip=True))
+        if not content_text and not content_node.find("img"):
+            return "公众号页面正文为空（可能被风控/验证拦截），当前 UA 无法获取正文。"
+
     if ("challenge-platform" in lowered or "__cf$cv$params" in lowered) and len(
         body_text
     ) < 500:
@@ -170,6 +346,14 @@ async def _detect_unextractable_page_reason(html: str) -> str | None:
         return "页面疑似前端渲染(SPA)壳页，原始 HTML 不包含正文内容。"
 
     return None
+
+
+_RETRYABLE_ABNORMAL_KEYWORDS = ("反爬", "验证", "环境异常")
+
+
+def _should_retry_with_another_ua(reason: str) -> bool:
+    """只有疑似被 UA 拦截时才值得换 UA 重试，其余情况保持一次抓取。"""
+    return any(keyword in reason for keyword in _RETRYABLE_ABNORMAL_KEYWORDS)
 
 
 async def _validate_fetch_url(plugin, url: str) -> tuple[bool, str]:
@@ -317,39 +501,81 @@ async def _process_fetched_text(
         return f"{truncated}...\n\n[系统提示] AI 总结失败，已回退为截断输出。"
 
 
-async def _get_from_url(
+_DEFAULT_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+)
+
+_DEFAULT_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+)
+
+# 公众号文章对 UA 极敏感：Linux / Android WebView 类 UA 会被判为"环境异常"并返回验证页，
+# 因此这里优先使用微信内置浏览器与桌面浏览器的 UA。
+_WECHAT_USER_AGENTS = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.49(0x18003121) "
+    "NetType/WIFI Language/zh_CN",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36 NetType/WIFI "
+    "MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090a13) XWEB/9129",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+)
+
+
+def _is_wechat_article_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host == "weixin.qq.com" or host.endswith(".weixin.qq.com")
+
+
+def _build_request_profiles(url: str) -> list[dict[str, str]]:
+    """按优先级生成请求头组合（含 UA），命中反爬时可依次换 UA 重试。"""
+    if _is_wechat_article_url(url):
+        wechat_headers = {
+            "Accept": _DEFAULT_ACCEPT,
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+            "Referer": "https://mp.weixin.qq.com/",
+        }
+        return [{"User-Agent": ua, **wechat_headers} for ua in _WECHAT_USER_AGENTS]
+
+    user_agents = list(_DEFAULT_USER_AGENTS)
+    random.shuffle(user_agents)
+    return [
+        {
+            "User-Agent": ua,
+            "Accept": _DEFAULT_ACCEPT,
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        for ua in user_agents
+    ]
+
+
+async def _fetch_page_once(
     plugin,
     url: str,
-    use_legacy: bool = False,
-    llm_compress: str = "inherit",
-    use_proxy: bool = False,
-) -> str:
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    ]
-    headers = {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
+    headers: dict[str, str],
+    *,
+    proxy: Any,
+    max_redirects: int,
+    max_download_bytes: int,
+) -> tuple[str, str, str]:
+    """抓取一次页面（手动跟随重定向）。
 
-    max_redirects = int(getattr(plugin, "fetch_url_max_redirects", 5))
-    max_download_bytes = int(
-        getattr(plugin, "fetch_url_max_download_bytes", 2 * 1024 * 1024)
-    )
-
+    返回 (kind, payload, error)，kind 为 html / text / error。
+    """
     try:
         timeout = aiohttp.ClientTimeout(total=30)
         current_url = url
-        html = ""
-
-        proxy = None
-        if use_proxy:
-            proxy = getattr(plugin, "fetch_url_proxy", "") or None
 
         async with aiohttp.ClientSession(timeout=timeout, proxy=proxy) as session:
             for _ in range(max_redirects + 1):
@@ -357,7 +583,7 @@ async def _get_from_url(
                     plugin, current_url
                 )
                 if not ok:
-                    return err
+                    return "error", "", err
 
                 async with session.get(
                     normalized_url,
@@ -367,12 +593,12 @@ async def _get_from_url(
                     if response.status in {301, 302, 303, 307, 308}:
                         location = response.headers.get("Location", "")
                         if not location:
-                            return "抓取网页失败：重定向地址为空。"
+                            return "error", "", "抓取网页失败：重定向地址为空。"
                         current_url = urllib.parse.urljoin(normalized_url, location)
                         continue
 
                     if response.status != 200:
-                        return f"抓取网页失败，状态码: {response.status}"
+                        return "error", "", f"抓取网页失败，状态码: {response.status}"
 
                     content_type = (response.headers.get("Content-Type") or "").lower()
                     is_json = (
@@ -384,47 +610,107 @@ async def _get_from_url(
                         or "text/plain" in content_type
                     )
                     if content_type and (not is_json and not is_html_or_text):
-                        return f"暂不支持该内容类型: {content_type}"
+                        return "error", "", f"暂不支持该内容类型: {content_type}"
 
-                    raw = await response.content.read(max_download_bytes + 1)
+                    raw = bytearray()
+                    # 注意：aiohttp 的 StreamReader.read(n) 可能在 n 字节之前提前返回
+                    # （大页面/压缩响应实测会被截断），这里显式累积到 EOF。
+                    async for chunk in response.content.iter_chunked(65536):
+                        raw.extend(chunk)
+                        if len(raw) > max_download_bytes:
+                            break
                     if len(raw) > max_download_bytes:
                         limit_mb = max_download_bytes / (1024 * 1024)
-                        return f"网页内容过大，已超过 {limit_mb:.1f} MB 限制。"
-
-                    charset = response.charset or "utf-8"
-                    decoded = raw.decode(charset, errors="ignore")
-
-                    if is_json:
-                        try:
-                            payload = json.loads(decoded)
-                        except Exception:
-                            return "抓取异常: 返回了 JSON 类型，但解析 JSON 失败。"
-
-                        json_text = await _extract_text_from_json_payload(payload)
-                        if not json_text.strip():
-                            return "抓取异常: JSON 返回为空或无可读文本字段。"
-                        return await _process_fetched_text(
-                            plugin, json_text, llm_compress=llm_compress
+                        return (
+                            "error",
+                            "",
+                            f"网页内容过大，已超过 {limit_mb:.1f} MB 限制。",
                         )
 
-                    html = decoded
+                    charset = response.charset or "utf-8"
+                    decoded = bytes(raw).decode(charset, errors="ignore")
+                    return ("text" if is_json else "html"), decoded, ""
 
-                    if not use_legacy:
-                        abnormal_reason = await _detect_unextractable_page_reason(html)
-                        if abnormal_reason:
-                            return f"抓取异常: {abnormal_reason}"
-                    break
-            else:
-                return "抓取网页失败：重定向次数超过限制。"
+            return "error", "", "抓取网页失败：重定向次数超过限制。"
+    except asyncio.TimeoutError:
+        return "error", "", "抓取网页超时。"
+    except aiohttp.ClientError as e:
+        return "error", "", f"抓取网页网络异常: {type(e).__name__} {str(e)}"
 
-        text = await _extract_best_text_from_html(html)
+
+async def _get_from_url(
+    plugin,
+    url: str,
+    use_legacy: bool = False,
+    llm_compress: str = "inherit",
+    use_proxy: bool = False,
+    include_img: bool = False,
+) -> str:
+    max_redirects = int(getattr(plugin, "fetch_url_max_redirects", 5))
+    max_download_bytes = int(
+        getattr(plugin, "fetch_url_max_download_bytes", 2 * 1024 * 1024)
+    )
+
+    proxy = None
+    if use_proxy:
+        proxy = getattr(plugin, "fetch_url_proxy", "") or None
+
+    profiles = _build_request_profiles(url)
+    if use_legacy:
+        profiles = profiles[:1]
+
+    try:
+        html = ""
+
+        for index, headers in enumerate(profiles):
+            kind, payload, err = await _fetch_page_once(
+                plugin,
+                url,
+                headers,
+                proxy=proxy,
+                max_redirects=max_redirects,
+                max_download_bytes=max_download_bytes,
+            )
+            if kind == "error":
+                return err
+
+            if kind == "text":
+                try:
+                    json_payload = json.loads(payload)
+                except Exception:
+                    return "抓取异常: 返回了 JSON 类型，但解析 JSON 失败。"
+
+                json_text = await _extract_text_from_json_payload(json_payload)
+                if not json_text.strip():
+                    return "抓取异常: JSON 返回为空或无可读文本字段。"
+                return await _process_fetched_text(
+                    plugin, json_text, llm_compress=llm_compress
+                )
+
+            html = payload
+
+            if use_legacy:
+                break
+
+            abnormal_reason = await _detect_unextractable_page_reason(html)
+            if not abnormal_reason:
+                break
+            if (
+                not _should_retry_with_another_ua(abnormal_reason)
+                or index == len(profiles) - 1
+            ):
+                return f"抓取异常: {abnormal_reason}"
+            logger.info(
+                f"网页抓取疑似被反爬拦截（{abnormal_reason}），更换 UA 重试 "
+                f"({index + 2}/{len(profiles)})。"
+            )
+
+        text = await _extract_best_text_from_html(
+            html, include_img=include_img, source_url=url
+        )
         if not text:
             return "网页内容为空或无法提取正文。"
         return await _process_fetched_text(plugin, text, llm_compress=llm_compress)
-    except asyncio.TimeoutError:
-        return "抓取网页超时。"
-    except aiohttp.ClientError as e:
-        return f"抓取网页网络异常: {type(e).__name__} {str(e)}"
     except Exception as e:
         logger.error(traceback.format_exc())
         return f"抓取网页内部异常: {type(e).__name__} {str(e)}"
@@ -456,6 +742,12 @@ async def handle_fetch_url(plugin, args: dict) -> str:
     else:
         use_proxy = bool(args.get("use_proxy", False))
 
+    include_img = False
+    if hasattr(plugin, "_safe_bool"):
+        include_img = plugin._safe_bool(args.get("include_img", False), False)
+    else:
+        include_img = bool(args.get("include_img", False))
+
     ok, normalized_url, err = await _normalize_and_validate_fetch_url(plugin, url)
     if not ok:
         return err
@@ -466,6 +758,7 @@ async def handle_fetch_url(plugin, args: dict) -> str:
         use_legacy=skip_filter,
         llm_compress=llm_compress,
         use_proxy=use_proxy,
+        include_img=include_img,
     )
 
 

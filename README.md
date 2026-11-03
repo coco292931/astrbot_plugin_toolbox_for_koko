@@ -12,6 +12,8 @@
 - 🌐 **高安全网页抓取 (Fetch)**：支持提取指定 URL 的正文文本。
   - **SSRF 深度防御**：自动阻止私有 IP、本地回环及云平台元数据地址，防止内网穿透。
   - **AI 智能总结**：网页内容过长时，可自动调用 LLM 进行提炼，避免 Token 溢出。
+  - **微信公众号适配**：针对 `mp.weixin.qq.com` 使用微信内置浏览器/桌面浏览器 UA 与 `Referer`，直取 `#js_content` 正文并附标题、公众号名；命中「环境异常」等反爬页时自动换 UA 重试。
+  - **图片标记**：保留图片出现的位置，默认只写 `[图片: 无障碍释义]`，`include_img=true` 时追加去掉跟踪参数的图片直链。
 - 📜 **历史聊天记录寻回**：支持群聊和私聊历史消息拉取。精简数据结构，大幅降低复盘场景下的 Token 开销。
 - 🧠 **支持 Mnemosyne 向量记忆库**：配合 [astrbot_plugin_mnemosyne](https://github.com/lxfight/astrbot_plugin_mnemosyne.git) 使用，提供向量检索与记忆管理能力。
 - 📦 **内存管理功能**：
@@ -80,6 +82,20 @@ astrbot_plugin_toolbox_for_koko/
 - **enable_fetch_url**: 是否启用网页抓取工具。
 - **fetch_url_over_limit_mode**: 超限策略 (`truncate` | `ai_summary` | `full`)。
 - **fetch_url_blocked_targets**: 额外禁用的 Host/IP 列表 (JSON 数组或列表)。
+
+**LLM 工具 `tool_fetch_url` / `koko_fetch_url` 参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `url` | string | 网页 URL，必须以 `http://` 或 `https://` 开头。 |
+| `skip_filter` | bool | `false`（默认）=增强抓取；`true`=原版逻辑（只抓一次、不检测反爬页）。 |
+| `llm_compress` | string | `inherit`（默认）/ `summary` / `truncate`，覆盖超限策略。 |
+| `use_proxy` | bool | `true` 时走 `fetch_url_proxy` 代理抓取。 |
+| `include_img` | bool | `false`（默认）只在图片位置插入 `[图片: 释义]`；`true` 追加去掉跟踪参数后的图片直链：`[图片: 释义](https://…)`。 |
+
+> 图片标记始终保留在原文对应位置，避免图文顺序错位；`alt` 是 `image.png`、`图片1` 之类的占位描述时只输出 `[图片]`。
+
+**微信公众号文章**：`mp.weixin.qq.com` 对 UA 很敏感，Linux/Android WebView 类 UA 会拿到「环境异常，完成验证后即可继续访问」的验证页。插件对公众号域名固定使用微信内置浏览器/桌面浏览器 UA + `Referer: https://mp.weixin.qq.com/`，直接读取 `#js_content` 正文，并在文首补上「标题 / 公众号 / 摘要」；若仍命中验证页或只有页面骨架，会自动更换 UA 重试。
 
 ### 💬 交互触发与群聊上下文管理 (interaction)
 
