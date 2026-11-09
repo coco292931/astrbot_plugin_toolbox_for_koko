@@ -8,9 +8,30 @@ from typing import Any
 
 from astrbot.api import logger
 
+# 锚点翻页（message_seq + reverse_order）单次请求条数上下限、最多请求轮数
+_HISTORY_MIN_FETCH_COUNT = 50
+_HISTORY_MAX_FETCH_COUNT = 500
+_HISTORY_MAX_FETCH_ROUNDS = 8
+# 适配器不支持锚点翻页时退回的 count 递增方式
+_HISTORY_LEGACY_STEP = 100
+_HISTORY_LEGACY_MAX_COUNT = 1000
 
-def _history_make_cache_key(mode: str, target_id: str, page_size: int) -> str:
-    return f"{mode}|{target_id}|{page_size}"
+
+def _history_new_cache() -> dict:
+    return {
+        "messages": [],
+        "seen": set(),
+        "anchor": None,
+        "anchor_real": None,
+        "last_fetch_count": 0,
+        "legacy": False,
+        "exhausted": False,
+        "updated_at": int(datetime.now().timestamp()),
+    }
+
+
+def _history_make_cache_key(mode: str, target_id: str) -> str:
+    return f"{mode}|{target_id}"
 
 
 def _history_prune_cache(plugin) -> None:
@@ -57,16 +78,83 @@ def _history_extract_messages(result: Any) -> list[dict]:
     return [m for m in messages if isinstance(m, dict)]
 
 
+def _history_seq_text(msg: dict) -> str:
+    """可用于去重的 message_seq（缺失或 0 视为不可用）。"""
+    value = msg.get("message_seq")
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in ("", "0"):
+        return ""
+    return text
+
+
 def _history_msg_unique_key(msg: dict) -> str:
+    seq_text = _history_seq_text(msg)
+    if seq_text:
+        return f"seq={seq_text}"
     msg_id = msg.get("message_id")
-    msg_seq = msg.get("message_seq")
     time_text = msg.get("time", "")
     sender_id = ""
     sender = msg.get("sender")
     if isinstance(sender, dict):
         sender_id = str(sender.get("user_id", "") or "")
     raw = str(msg.get("raw_message", "") or "")
-    return f"id={msg_id}|seq={msg_seq}|t={time_text}|u={sender_id}|raw={raw[:32]}"
+    return f"id={msg_id}|t={time_text}|u={sender_id}|raw={raw[:32]}"
+
+
+def _history_anchor_value(msg: dict) -> Any:
+    """翻页锚点：优先 message_seq，回退 message_id。"""
+    for key in ("message_seq", "message_id"):
+        value = msg.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return int(text)
+        except Exception:
+            return text
+    return None
+
+
+def _history_matches_anchor(msg: dict, anchor: Any) -> bool:
+    anchor_text = str(anchor).strip()
+    for key in ("message_seq", "message_id"):
+        value = msg.get(key)
+        if value is not None and str(value).strip() == anchor_text:
+            return True
+    return False
+
+
+def _history_real_seq(msg: dict) -> int | None:
+    try:
+        value = int(str(msg.get("real_seq")))
+    except Exception:
+        return None
+    return value if value >= 0 else None
+
+
+def _history_merge(cache: dict, batch: list[dict]) -> int:
+    """把一批消息去重后并入缓存，返回新增条数。"""
+    seen = cache.get("seen")
+    if not isinstance(seen, set):
+        seen = set()
+        cache["seen"] = seen
+    messages = cache.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+        cache["messages"] = messages
+    added = 0
+    for msg in batch:
+        unique_key = _history_msg_unique_key(msg)
+        if unique_key in seen:
+            continue
+        seen.add(unique_key)
+        messages.append(msg)
+        added += 1
+    return added
 
 
 def _history_pick_seq(msg: dict) -> int:
@@ -92,14 +180,14 @@ def _history_format_time(msg: dict) -> str:
         return "--:--"
 
 
-def _history_sort_key_desc(msg: dict) -> tuple[int, int]:
+def _history_sort_key_desc(msg: dict) -> tuple[int, int, int]:
     ts_num = 0
     try:
         ts_num = int(str(msg.get("time", 0) or 0))
     except Exception:
         ts_num = 0
-    seq_num = _history_pick_seq(msg)
-    return ts_num, seq_num
+    real_seq = _history_real_seq(msg)
+    return ts_num, 0 if real_seq is None else real_seq, _history_pick_seq(msg)
 
 
 async def handle_history(plugin, event, args: dict) -> str:
@@ -165,7 +253,7 @@ async def handle_history(plugin, event, args: dict) -> str:
     if not client or not hasattr(client, "call_action"):
         return "无法获取客户端 adapter，该端点可能不支持原生 call_action()。"
 
-    cache_key = _history_make_cache_key(mode, target_id, page_size)
+    cache_key = _history_make_cache_key(mode, target_id)
     cache_dict = getattr(plugin, "_history_pagination_cache", None)
     if not isinstance(cache_dict, dict):
         cache_dict = {}
@@ -173,71 +261,119 @@ async def handle_history(plugin, event, args: dict) -> str:
     cache = cache_dict.get(cache_key)
 
     if page == 1 or refresh or not isinstance(cache, dict):
-        cache = {
-            "messages": [],
-            "seen": set(),
-            "last_fetch_count": 0,
-            "exhausted": False,
-            "updated_at": int(datetime.now().timestamp()),
-        }
+        cache = _history_new_cache()
         cache_dict[cache_key] = cache
+    else:
+        # 兼容旧版本缓存字典（缺少 anchor/legacy 等字段）
+        for key, default in _history_new_cache().items():
+            cache.setdefault(key, default)
 
-    async def _call_history(fetch_count: int) -> Any:
+    async def _call_history(params: dict) -> Any:
         if mode == "group":
             return await client.call_action(
-                "get_group_msg_history",
-                group_id=target_id,
-                count=fetch_count,
+                "get_group_msg_history", group_id=target_id, **params
             )
         return await client.call_action(
-            "get_friend_msg_history",
-            user_id=target_id,
-            count=fetch_count,
+            "get_friend_msg_history", user_id=target_id, **params
         )
 
     try:
         needed_end = page * page_size
         fetch_rounds = 0
 
-        while len(cache.get("messages", [])) < needed_end and not cache.get(
-            "exhausted", False
-        ):
-            if fetch_rounds >= 8:
+        while len(cache["messages"]) < needed_end and not cache["exhausted"]:
+            if fetch_rounds >= _HISTORY_MAX_FETCH_ROUNDS:
                 break
             fetch_rounds += 1
 
-            fetch_count = max(int(cache.get("last_fetch_count", 0)), 0) + 100
-            fetch_count = min(fetch_count, 1000)
-            result = await _call_history(fetch_count)
-            logger.debug(f"历史消息接口返回: {result}")
+            if cache["legacy"]:
+                # 适配器不支持 message_seq/reverse_order：按 count 递增重拉最新
+                fetch_count = min(
+                    int(cache["last_fetch_count"]) + _HISTORY_LEGACY_STEP,
+                    _HISTORY_LEGACY_MAX_COUNT,
+                )
+                batch_messages = _history_extract_messages(
+                    await _call_history({"count": fetch_count})
+                )
+                if not batch_messages:
+                    cache["exhausted"] = True
+                    break
+                cache["last_fetch_count"] = fetch_count
+                added = _history_merge(cache, batch_messages)
+                if added == 0 or len(batch_messages) < fetch_count:
+                    cache["exhausted"] = True
+                cache["updated_at"] = int(datetime.now().timestamp())
+                continue
+
+            # 首轮取最新一批，之后用 message_seq 作锚点 + reverse_order 向前翻页
+            remaining = needed_end - len(cache["messages"])
+            fetch_count = min(
+                max(remaining, page_size, _HISTORY_MIN_FETCH_COUNT),
+                _HISTORY_MAX_FETCH_COUNT,
+            )
+            anchor = cache["anchor"]
+            params: dict = {"count": fetch_count}
+            if anchor is not None:
+                params["message_seq"] = anchor
+                params["reverse_order"] = True
+
+            try:
+                result = await _call_history(params)
+            except Exception:
+                logger.debug(
+                    "锚点翻页请求失败，改用 count 递增方式\n" + traceback.format_exc()
+                )
+                cache["legacy"] = True
+                continue
 
             batch_messages = _history_extract_messages(result)
+            logger.debug(
+                f"历史消息接口返回 {len(batch_messages)} 条"
+                f"（anchor={anchor}, count={fetch_count}）"
+            )
             if not batch_messages:
                 cache["exhausted"] = True
                 break
 
-            before_count = len(cache["messages"])
-            seen = cache.get("seen", set())
-            if not isinstance(seen, set):
-                seen = set()
+            if anchor is not None and not any(
+                _history_matches_anchor(msg, anchor) for msg in batch_messages
+            ):
+                logger.debug(
+                    "接口未按锚点返回（可能不支持 message_seq/reverse_order），"
+                    "改用 count 递增方式"
+                )
+                cache["legacy"] = True
+                continue
 
-            for msg in batch_messages:
-                unique_key = _history_msg_unique_key(msg)
-                if unique_key in seen:
-                    continue
-                seen.add(unique_key)
-                cache["messages"].append(msg)
+            added = _history_merge(cache, batch_messages)
+            oldest = batch_messages[0]
+            oldest_anchor = _history_anchor_value(oldest)
+            oldest_real = _history_real_seq(oldest)
 
-            cache["seen"] = seen
-            after_count = len(cache["messages"])
-            if after_count == before_count:
-                cache["exhausted"] = True
-                break
+            if oldest_anchor is None:
+                logger.debug("消息缺少 message_seq，无法锚点翻页，改用 count 递增方式")
+                cache["legacy"] = True
+                continue
 
-            cache["last_fetch_count"] = fetch_count
-            if len(batch_messages) < fetch_count:
-                cache["exhausted"] = True
+            progressed = str(oldest_anchor) != str(anchor)
+            if oldest_real is not None:
+                prev_real = cache["anchor_real"]
+                if prev_real is not None and oldest_real >= int(prev_real):
+                    progressed = False
+                if oldest_real <= 1:
+                    cache["exhausted"] = True
 
+            if added == 0 or not progressed:
+                # 首轮就翻不动说明没数据了；已有锚点还翻不动说明锚点翻页不可用
+                if anchor is None:
+                    cache["exhausted"] = True
+                else:
+                    cache["legacy"] = True
+                continue
+
+            cache["anchor"] = oldest_anchor
+            if oldest_real is not None:
+                cache["anchor_real"] = oldest_real
             cache["updated_at"] = int(datetime.now().timestamp())
 
         cache["updated_at"] = int(datetime.now().timestamp())
